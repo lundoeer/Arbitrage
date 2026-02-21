@@ -1,0 +1,38 @@
+# ── Python ──────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+
+# ── Project data & secrets ──────────────────────────
+data/
+logs/
+*.env
+*.log
+
+# ── Archived / legacy ──────────────────────────────
+_oldproject/
+_deprecated/
+
+# ── IDE & editor ───────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Linters & type checkers ─────────────────────────
+.ruff_cache/
+.pyright/
+.mypy_cache/
+.pytest_cache/
+
+# ── OS ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini

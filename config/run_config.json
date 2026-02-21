@@ -1,0 +1,39 @@
+{
+  "api": {
+    "base_url": "https://api.elections.kalshi.com/trade-api/v2"
+  },
+  "health": {
+    "transport_heartbeat_stale_seconds": 1.5,
+    "market_data_stale_seconds": 1.5,
+    "max_lag_ms": 2000,
+    "require_source_timestamp": true,
+    "max_source_age_ms": 2500
+  },
+  "markets": {
+    "target_series": "KXBTC15M",
+    "target_market": ""
+  },
+  "buy": {
+    "min_gross_edge_threshold": 0.04,
+    "max_spend_per_market_usd": 10.0,
+    "max_size_cap_per_leg": 20.0
+  },
+  "buy_execution": {
+    "enabled": true,
+    "cooldown_ms": 120000,
+    "max_attempts_per_run": 1,
+    "api_retry": {
+      "enabled": true,
+      "max_attempts": 3,
+      "base_backoff_seconds": 0.5,
+      "jitter_ratio": 0.2,
+      "include_post": true
+    }
+  },
+  "execution": {
+    "best_ask_and_bids_at_max": 0.95,
+    "best_ask_and_bids_at_min": 0.05,
+    "market_start_trade_time_seconds": 120,
+    "market_end_trade_time_seconds": 120
+  }
+}

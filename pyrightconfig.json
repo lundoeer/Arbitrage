@@ -1,0 +1,22 @@
+{
+  "include": [
+    "scripts"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv",
+    "data",
+    "logs",
+    "_oldproject",
+    "_deprecated"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.11",
+  "reportMissingTypeStubs": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownParameterType": false
+}

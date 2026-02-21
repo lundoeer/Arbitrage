@@ -1,0 +1,6 @@
+requests
+python-dotenv
+websockets
+cryptography
+tzdata
+py-clob-client
