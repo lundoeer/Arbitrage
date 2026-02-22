@@ -258,6 +258,7 @@ class PolymarketDiscoveryClient:
                     {
                         "platform": "polymarket",
                         "market_id": market_id,
+                        "condition_id": str(market.get("conditionId", "")),
                         "event_id": str(event.get("id", "")),
                         "event_slug": event_slug,
                         "event_title": event_title,

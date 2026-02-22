@@ -49,6 +49,7 @@ def load_selected_markets(
     pm_token_no = str(selected_pm.get("token_no") or "").strip()
     pm_slug = str(selected_pm.get("event_slug") or "").strip()
     pm_market_id = str(selected_pm.get("market_id") or "").strip()
+    pm_condition_id = str(selected_pm.get("condition_id") or "").strip()
     kx_ticker = str(selected_kx.get("ticker") or "").strip()
 
     if not pm_token_yes or not pm_token_no:
@@ -72,6 +73,7 @@ def load_selected_markets(
         "polymarket": {
             "event_slug": pm_slug,
             "market_id": pm_market_id,
+            "condition_id": pm_condition_id,
             "token_yes": pm_token_yes,
             "token_no": pm_token_no,
             "window_end": selected_pm.get("window_end"),

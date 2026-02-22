@@ -102,6 +102,20 @@ class BuyExecutionRuntimeConfig:
     api_retry: BuyExecutionApiRetryConfig = field(default_factory=BuyExecutionApiRetryConfig)
 
 
+@dataclass(frozen=True)
+class PositionMonitoringRuntimeConfig:
+    enabled: bool = False
+    require_bootstrap_before_buy: bool = True
+    polymarket_user_ws_enabled: bool = True
+    kalshi_market_positions_ws_enabled: bool = True
+    polymarket_poll_seconds: float = 10.0
+    kalshi_poll_seconds: float = 20.0
+    loop_sleep_seconds: float = 0.2
+    drift_tolerance_contracts: float = 0.0
+    stale_warning_seconds: int = 60
+    stale_error_seconds: int = 180
+
+
 def load_health_config_from_run_config(*, config_path: Path) -> WsHealthConfig:
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     health = _as_dict(payload.get("health"))
@@ -259,4 +273,60 @@ def buy_execution_runtime_config_to_dict(config: BuyExecutionRuntimeConfig) -> D
             "jitter_ratio": float(config.api_retry.jitter_ratio),
             "include_post": bool(config.api_retry.include_post),
         },
+    }
+
+
+def load_position_monitoring_runtime_config_from_run_config(*, config_path: Path) -> PositionMonitoringRuntimeConfig:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    monitor = _as_dict(payload.get("position_monitoring"))
+    return PositionMonitoringRuntimeConfig(
+        enabled=_to_bool(monitor.get("enabled"), default=False),
+        require_bootstrap_before_buy=_to_bool(monitor.get("require_bootstrap_before_buy"), default=True),
+        polymarket_user_ws_enabled=_to_bool(monitor.get("polymarket_user_ws_enabled"), default=True),
+        kalshi_market_positions_ws_enabled=_to_bool(monitor.get("kalshi_market_positions_ws_enabled"), default=True),
+        polymarket_poll_seconds=_to_float(
+            monitor.get("polymarket_poll_seconds"),
+            default=10.0,
+            min_value=0.2,
+        ),
+        kalshi_poll_seconds=_to_float(
+            monitor.get("kalshi_poll_seconds"),
+            default=20.0,
+            min_value=0.2,
+        ),
+        loop_sleep_seconds=_to_float(
+            monitor.get("loop_sleep_seconds"),
+            default=0.2,
+            min_value=0.05,
+        ),
+        drift_tolerance_contracts=_to_float(
+            monitor.get("drift_tolerance_contracts"),
+            default=0.0,
+            min_value=0.0,
+        ),
+        stale_warning_seconds=_to_int(
+            monitor.get("stale_warning_seconds"),
+            default=60,
+            min_value=1,
+        ),
+        stale_error_seconds=_to_int(
+            monitor.get("stale_error_seconds"),
+            default=180,
+            min_value=1,
+        ),
+    )
+
+
+def position_monitoring_runtime_config_to_dict(config: PositionMonitoringRuntimeConfig) -> Dict[str, Any]:
+    return {
+        "enabled": bool(config.enabled),
+        "require_bootstrap_before_buy": bool(config.require_bootstrap_before_buy),
+        "polymarket_user_ws_enabled": bool(config.polymarket_user_ws_enabled),
+        "kalshi_market_positions_ws_enabled": bool(config.kalshi_market_positions_ws_enabled),
+        "polymarket_poll_seconds": float(config.polymarket_poll_seconds),
+        "kalshi_poll_seconds": float(config.kalshi_poll_seconds),
+        "loop_sleep_seconds": float(config.loop_sleep_seconds),
+        "drift_tolerance_contracts": float(config.drift_tolerance_contracts),
+        "stale_warning_seconds": int(config.stale_warning_seconds),
+        "stale_error_seconds": int(config.stale_error_seconds),
     }

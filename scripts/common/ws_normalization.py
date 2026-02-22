@@ -50,6 +50,33 @@ def to_epoch_ms(raw: Any) -> Optional[int]:
     return int(dt.timestamp() * 1000)
 
 
+def to_text(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text if text else None
+
+
+def to_side(raw: Any) -> Optional[str]:
+    text = to_text(raw)
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"buy", "sell"}:
+        return lowered
+    return None
+
+
+def to_outcome_side(raw: Any) -> Optional[str]:
+    text = to_text(raw)
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"yes", "no"}:
+        return lowered
+    return None
+
+
 def normalize_ladder(levels: Any, *, side: str, max_levels: Optional[int] = None) -> List[List[float]]:
     parsed: List[Tuple[float, float]] = []
     for level in levels or []:
@@ -255,6 +282,141 @@ def normalize_kalshi_event(message: Dict[str, Any], recv_ms: int, *, market_tick
         "market_ticker": market_ticker,
         "source_event_type": event_type or "unknown",
         "payload": data,
+        "source_timestamp_ms": source_ts_ms,
+        "lag_ms": lag_ms,
+    }
+
+
+def normalize_polymarket_user_event(
+    message: Dict[str, Any],
+    recv_ms: int,
+    *,
+    condition_id: Optional[str] = None,
+) -> Iterable[Dict[str, Any]]:
+    event_type = str(message.get("event_type") or message.get("type") or "").strip().lower()
+    market = str(message.get("market") or "").strip() or None
+    if condition_id:
+        expected = str(condition_id).strip()
+        if expected and market and market != expected:
+            return
+
+    source_ts_ms = to_epoch_ms(message.get("last_update") or message.get("timestamp") or message.get("matchtime"))
+    lag_ms = recv_ms - source_ts_ms if source_ts_ms is not None else None
+
+    if event_type == "trade":
+        trade_status = to_text(message.get("status"))
+        trade_status_upper = str(trade_status or "").upper() if trade_status else None
+        yield {
+            "kind": "polymarket_user_trade",
+            "event_id": to_text(message.get("id")),
+            "market": market,
+            "asset_id": to_text(message.get("asset_id")),
+            "outcome_side": to_outcome_side(message.get("outcome")),
+            "order_side": to_side(message.get("side")),
+            "price": to_float(message.get("price")),
+            "size": to_float(message.get("size")),
+            "status": trade_status_upper,
+            "is_confirmed": bool(trade_status_upper == "CONFIRMED"),
+            "trade_owner": to_text(message.get("trade_owner")) or to_text(message.get("owner")),
+            "taker_order_id": to_text(message.get("taker_order_id")),
+            "maker_orders": list(message.get("maker_orders") or []) if isinstance(message.get("maker_orders"), list) else [],
+            "source_event_type": "trade",
+            "source_timestamp_ms": source_ts_ms,
+            "lag_ms": lag_ms,
+        }
+        return
+
+    if event_type == "order":
+        order_event_type = to_text(message.get("type"))
+        yield {
+            "kind": "polymarket_user_order",
+            "event_id": to_text(message.get("id")),
+            "market": market,
+            "asset_id": to_text(message.get("asset_id")),
+            "outcome_side": to_outcome_side(message.get("outcome")),
+            "order_side": to_side(message.get("side")),
+            "price": to_float(message.get("price")),
+            "original_size": to_float(message.get("original_size")),
+            "size_matched": to_float(message.get("size_matched")),
+            "status": str(order_event_type or "").upper() or None,
+            "order_owner": to_text(message.get("order_owner")) or to_text(message.get("owner")),
+            "associate_trades": (
+                list(message.get("associate_trades") or [])
+                if isinstance(message.get("associate_trades"), list)
+                else []
+            ),
+            "source_event_type": "order",
+            "source_timestamp_ms": source_ts_ms,
+            "lag_ms": lag_ms,
+        }
+        return
+
+    yield {
+        "kind": "control_or_unknown",
+        "source_event_type": event_type or "unknown",
+        "market": market,
+        "source_timestamp_ms": source_ts_ms,
+        "lag_ms": lag_ms,
+    }
+
+
+def normalize_kalshi_market_positions_event(
+    message: Dict[str, Any],
+    recv_ms: int,
+    *,
+    market_ticker: Optional[str] = None,
+) -> Iterable[Dict[str, Any]]:
+    event_type = str(message.get("type") or message.get("event_type") or "").strip().lower()
+    data = message.get("msg") if isinstance(message.get("msg"), dict) else message.get("data")
+    if not isinstance(data, dict):
+        data = message
+
+    source_ts_ms = to_epoch_ms(data.get("ts") or data.get("timestamp") or data.get("time"))
+    lag_ms = recv_ms - source_ts_ms if source_ts_ms is not None else None
+
+    if event_type != "market_position":
+        yield {
+            "kind": "control_or_unknown",
+            "market_ticker": to_text(data.get("market_ticker")) or market_ticker,
+            "source_event_type": event_type or "unknown",
+            "payload": data,
+            "source_timestamp_ms": source_ts_ms,
+            "lag_ms": lag_ms,
+        }
+        return
+
+    ticker = to_text(data.get("market_ticker")) or to_text(market_ticker)
+    if market_ticker and ticker and str(ticker) != str(market_ticker):
+        return
+
+    raw_position = to_float(data.get("position_fp"))
+    if raw_position is None:
+        raw_position = to_float(data.get("position"))
+    position = float(raw_position or 0.0)
+
+    # Kalshi position streams encode cost/pnl fields in centi-cents (1/10_000 USD).
+    def _to_usd(raw: Any) -> Optional[float]:
+        value = to_float(raw)
+        if value is None:
+            return None
+        return float(value) / 10_000.0
+
+    yes_position = position if position > 0 else 0.0
+    no_position = abs(position) if position < 0 else 0.0
+
+    yield {
+        "kind": "kalshi_market_position",
+        "market_ticker": ticker,
+        "user_id": to_text(data.get("user_id")),
+        "position": position,
+        "position_yes": float(yes_position),
+        "position_no": float(no_position),
+        "position_cost_usd": _to_usd(data.get("position_cost")),
+        "position_fee_cost_usd": _to_usd(data.get("position_fee_cost")),
+        "realized_pnl_usd": _to_usd(data.get("realized_pnl")),
+        "fees_paid_usd": _to_usd(data.get("fees_paid")),
+        "volume": to_float(data.get("volume_fp")) if data.get("volume_fp") is not None else to_float(data.get("volume")),
+        "source_event_type": "market_position",
         "source_timestamp_ms": source_ts_ms,
         "lag_ms": lag_ms,
     }

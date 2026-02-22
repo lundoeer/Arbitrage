@@ -485,6 +485,7 @@ class PolymarketAuthHeadersProvider(Protocol):
 class _PolymarketClobContext:
     clob_client: Any
     order_args_cls: Any
+    market_order_args_cls: Any
     l2_api_key: str
     l2_api_secret: str
     l2_api_passphrase: str
@@ -605,22 +606,123 @@ def _polymarket_order_type(value: Optional[str]) -> str:
     return "FOK"
 
 
-def _polymarket_nonce_from_client_order_id(client_order_id: str) -> int:
-    nonce_seed = hashlib.sha256(str(client_order_id).encode("utf-8")).hexdigest()[:12]
-    return int(nonce_seed, 16)
+def _resolve_polymarket_nonce_address(clob_client: Any) -> str:
+    builder = getattr(clob_client, "builder", None)
+    funder = str(getattr(builder, "funder", "") or "").strip()
+    if funder:
+        return _normalize_eth_address(funder)
+    return _normalize_eth_address(_resolve_clob_signer_address(clob_client))
+
+
+def _fetch_polymarket_exchange_nonce(*, clob_client: Any, nonce_address: str) -> int:
+    try:
+        from py_clob_client.config import get_contract_config
+        from py_clob_client.constants import POLYGON
+    except Exception as exc:
+        raise RuntimeError(
+            "Missing py-clob-client components required for Polymarket nonce lookup."
+        ) from exc
+
+    contract_config = get_contract_config(POLYGON)
+    if contract_config is None:
+        raise RuntimeError("Could not load Polymarket contract config for Polygon")
+    exchange_address = str(getattr(contract_config, "exchange", "") or "").strip()
+    if not exchange_address:
+        raise RuntimeError("Polymarket contract config missing exchange address")
+
+    encoded_addr = str(nonce_address).replace("0x", "").lower().rjust(64, "0")
+    data = f"0x7ecebe00{encoded_addr}"  # nonces(address)
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [{"to": exchange_address, "data": data}, "latest"],
+    }
+
+    transport = ApiTransport(
+        timeout_seconds=10,
+        retry_config=RetryConfig(
+            max_attempts=3,
+            base_backoff_seconds=0.5,
+            jitter_ratio=0.2,
+            retry_methods=frozenset({"POST"}),
+        ),
+    )
+    errors: List[str] = []
+    for url in _polymarket_funder_rpc_urls_from_env():
+        if not url:
+            continue
+        try:
+            _, response_payload = transport.request_json("POST", url, json=payload, allow_status={200})
+            if not isinstance(response_payload, dict):
+                raise RuntimeError("Invalid RPC response for Polymarket nonce lookup")
+            if response_payload.get("error") is not None:
+                raise RuntimeError(f"RPC error during Polymarket nonce lookup: {response_payload.get('error')}")
+            result = response_payload.get("result")
+            if not isinstance(result, str) or not result.startswith("0x"):
+                raise RuntimeError("RPC result missing/invalid during Polymarket nonce lookup")
+            return int(result, 16)
+        except Exception as exc:
+            errors.append(f"{url}: {type(exc).__name__}: {exc}")
+
+    raise RuntimeError(
+        "Polymarket nonce lookup failed across RPC endpoints. "
+        f"Errors: {' | '.join(errors) if errors else 'unknown'}"
+    )
+
+
+@dataclass
+class PolymarketNonceManager:
+    clob_client: Any
+
+    def __post_init__(self) -> None:
+        self.nonce_address = _resolve_polymarket_nonce_address(self.clob_client)
+        self._next_nonce = int(
+            _fetch_polymarket_exchange_nonce(clob_client=self.clob_client, nonce_address=self.nonce_address)
+        )
+
+    def peek_nonce(self) -> int:
+        return int(self._next_nonce)
+
+    def reserve_nonce(self) -> int:
+        nonce = int(self._next_nonce)
+        self._next_nonce = int(nonce + 1)
+        return int(nonce)
+
+    def mark_order_accepted(self, *, nonce: int) -> int:
+        accepted = int(nonce)
+        if accepted >= int(self._next_nonce):
+            self._next_nonce = int(accepted + 1)
+        return int(self._next_nonce)
+
+    def refresh(self) -> int:
+        self._next_nonce = int(
+            _fetch_polymarket_exchange_nonce(clob_client=self.clob_client, nonce_address=self.nonce_address)
+        )
+        return int(self._next_nonce)
+
+
+def _build_polymarket_nonce_manager(*, clob_client: Any) -> PolymarketNonceManager:
+    return PolymarketNonceManager(clob_client=clob_client)
+
+
+def _is_polymarket_invalid_nonce_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "invalid nonce" in text
 
 
 def _build_polymarket_signed_order(
     *,
     clob_client: Any,
     order_args_cls: Any,
+    market_order_args_cls: Any,
     l2_api_key: str,
     instrument_id: str,
     size: float,
     order_kind: str,
     limit_price: Optional[float],
     time_in_force: Optional[str],
-    client_order_id: str,
+    nonce: int,
 ) -> Tuple[Any, Dict[str, Any]]:
     token_id = str(instrument_id or "").strip()
     kind = str(order_kind or "").strip().lower()
@@ -636,16 +738,30 @@ def _build_polymarket_signed_order(
         raise RuntimeError("Polymarket order signing requires limit_price")
     if float(size) <= 0:
         raise RuntimeError("Polymarket buy order requires positive size")
-
-    signed_order = clob_client.create_order(
-        order_args_cls(
-            token_id=token_id,
-            price=float(effective_limit_price),
-            size=float(size),
-            side="BUY",
-            nonce=_polymarket_nonce_from_client_order_id(client_order_id),
+    if kind == "market":
+        # BUY market orders expect quote amount ($), while planner sizing is
+        # in shares. Convert shares to notional using the chosen price cap.
+        quote_amount = float(size) * float(effective_limit_price)
+        signed_order = clob_client.create_market_order(
+            market_order_args_cls(
+                token_id=token_id,
+                amount=float(quote_amount),
+                side="BUY",
+                price=float(effective_limit_price),
+                nonce=int(nonce),
+                order_type=_polymarket_order_type(time_in_force if time_in_force else kind),
+            )
         )
-    )
+    else:
+        signed_order = clob_client.create_order(
+            order_args_cls(
+                token_id=token_id,
+                price=float(effective_limit_price),
+                size=float(size),
+                side="BUY",
+                nonce=int(nonce),
+            )
+        )
     payload = {
         "order": signed_order.dict(),
         "owner": l2_api_key,
@@ -776,7 +892,7 @@ def _build_polymarket_clob_context_from_env(
 ) -> _PolymarketClobContext:
     try:
         from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds, OrderArgs
+        from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, OrderArgs
     except Exception as exc:
         raise RuntimeError(
             "Missing dependency py-clob-client. Install it to enable Polymarket order signing."
@@ -826,6 +942,7 @@ def _build_polymarket_clob_context_from_env(
     return _PolymarketClobContext(
         clob_client=clob_client,
         order_args_cls=OrderArgs,
+        market_order_args_cls=MarketOrderArgs,
         l2_api_key=l2_key,
         l2_api_secret=l2_secret,
         l2_api_passphrase=l2_passphrase,
@@ -844,6 +961,7 @@ def build_polymarket_order_signing_providers_from_env(
     py-clob-client.
     """
     clob_context = _build_polymarket_clob_context_from_env(base_url=base_url)
+    nonce_manager = _build_polymarket_nonce_manager(clob_client=clob_context.clob_client)
 
     def signed_order_builder(
         *,
@@ -855,16 +973,18 @@ def build_polymarket_order_signing_providers_from_env(
         time_in_force: Optional[str],
         client_order_id: str,
     ) -> Dict[str, Any]:
+        nonce = nonce_manager.reserve_nonce()
         _, payload = _build_polymarket_signed_order(
             clob_client=clob_context.clob_client,
             order_args_cls=clob_context.order_args_cls,
+            market_order_args_cls=clob_context.market_order_args_cls,
             l2_api_key=clob_context.l2_api_key,
             instrument_id=instrument_id,
             size=float(size),
             order_kind=order_kind,
             limit_price=limit_price,
             time_in_force=time_in_force,
-            client_order_id=client_order_id,
+            nonce=nonce,
         )
         return payload
 
@@ -899,11 +1019,14 @@ def build_polymarket_api_buy_client_from_env(
     transport: Optional[ApiTransport] = None,
 ) -> "PolymarketApiBuyClient":
     clob_context = _build_polymarket_clob_context_from_env(base_url=base_url)
+    nonce_manager = _build_polymarket_nonce_manager(clob_client=clob_context.clob_client)
     return PolymarketApiBuyClient(
         base_url=base_url,
         clob_client=clob_context.clob_client,
         order_args_cls=clob_context.order_args_cls,
+        market_order_args_cls=clob_context.market_order_args_cls,
         l2_api_key=clob_context.l2_api_key,
+        nonce_manager=nonce_manager,
         transport=transport,
     )
 
@@ -925,13 +1048,19 @@ class PolymarketApiBuyClient(BuyVenueClient):
         base_url: str = "https://clob.polymarket.com",
         clob_client: Any,
         order_args_cls: Any,
+        market_order_args_cls: Any,
         l2_api_key: str,
+        nonce_manager: Optional[PolymarketNonceManager] = None,
         transport: Optional[ApiTransport] = None,
     ) -> None:
         self.base_url = str(base_url).rstrip("/")
         self.clob_client = clob_client
         self.order_args_cls = order_args_cls
+        self.market_order_args_cls = market_order_args_cls
         self.l2_api_key = str(l2_api_key)
+        self.nonce_manager = (
+            nonce_manager if nonce_manager is not None else _build_polymarket_nonce_manager(clob_client=clob_client)
+        )
         self.transport = transport or ApiTransport(timeout_seconds=10)
 
     def place_buy_order(
@@ -945,18 +1074,32 @@ class PolymarketApiBuyClient(BuyVenueClient):
         time_in_force: Optional[str],
         client_order_id: str,
     ) -> Dict[str, Any]:
-        signed_order, payload = _build_polymarket_signed_order(
-            clob_client=self.clob_client,
-            order_args_cls=self.order_args_cls,
-            l2_api_key=self.l2_api_key,
-            instrument_id=instrument_id,
-            size=float(size),
-            order_kind=order_kind,
-            limit_price=limit_price,
-            time_in_force=time_in_force,
-            client_order_id=client_order_id,
-        )
-        response_payload = self._post_order_with_retry(signed_order, payload)
+        def _submit_once() -> Tuple[int, Dict[str, Any], Any]:
+            nonce = self.nonce_manager.peek_nonce()
+            signed_order, payload = _build_polymarket_signed_order(
+                clob_client=self.clob_client,
+                order_args_cls=self.order_args_cls,
+                market_order_args_cls=self.market_order_args_cls,
+                l2_api_key=self.l2_api_key,
+                instrument_id=instrument_id,
+                size=float(size),
+                order_kind=order_kind,
+                limit_price=limit_price,
+                time_in_force=time_in_force,
+                nonce=nonce,
+            )
+            response_payload_inner = self._post_order_with_retry(signed_order, payload)
+            return nonce, payload, response_payload_inner
+
+        try:
+            nonce, payload, response_payload = _submit_once()
+            self.nonce_manager.mark_order_accepted(nonce=nonce)
+        except Exception as exc:
+            if not _is_polymarket_invalid_nonce_error(exc):
+                raise
+            self.nonce_manager.refresh()
+            nonce, payload, response_payload = _submit_once()
+            self.nonce_manager.mark_order_accepted(nonce=nonce)
         return {
             "ok": True,
             "venue": "polymarket",

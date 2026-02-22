@@ -107,4 +107,55 @@ def build_parser() -> argparse.ArgumentParser:
             "(default from config.buy_execution.max_attempts_per_run). 0 means unlimited."
         ),
     )
+    parser.add_argument(
+        "--enable-position-monitoring",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable position monitoring (REST polling + optional user position streams).",
+    )
+    parser.add_argument(
+        "--polymarket-user-ws-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable Polymarket user websocket ingestion for position monitoring (default: true).",
+    )
+    parser.add_argument(
+        "--kalshi-market-positions-ws-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable Kalshi market_positions websocket ingestion for position monitoring (default: true).",
+    )
+    parser.add_argument(
+        "--position-polymarket-poll-seconds",
+        type=float,
+        default=None,
+        help="Polymarket positions poll interval seconds (default: 10.0).",
+    )
+    parser.add_argument(
+        "--position-kalshi-poll-seconds",
+        type=float,
+        default=None,
+        help="Kalshi positions poll interval seconds (default: 20.0).",
+    )
+    parser.add_argument(
+        "--position-loop-sleep-seconds",
+        type=float,
+        default=None,
+        help="Internal sleep cadence for position reconcile loop (default: 0.2).",
+    )
+    parser.add_argument(
+        "--log-positions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable position monitoring event/reconcile logging to data/position_monitoring_log__*.jsonl.",
+    )
+    parser.add_argument(
+        "--log-account-snapshots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable account/portfolio boundary snapshot logging (run/market start+end) "
+            "to data/account_portfolio_snapshot_log__*.jsonl (default: true)."
+        ),
+    )
     return parser

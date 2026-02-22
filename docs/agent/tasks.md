@@ -22,13 +22,23 @@ How this file is structured:
 - [x] Kalshi auth reconnect fix — `headers_factory` pattern
 - [x] Polymarket `post_order` retry wrapper
 - [x] Live integration test — 2 segments, 13K+ Kalshi / 27K+ Polymarket messages
+- [x] #12 — Design position monitoring system (order status polling, fill tracking, net position)
+- [x] #15 — Build `PositionRuntime` — tracks open positions, fills, and net exposure
+- [x] #16 — Integrate position monitoring into engine loop
 
 ## Now
 
-- No active work items.
+- [/] #18 — Refactor Engine Architecture
+  - Create `scripts/common/engine_logger.py` for logging setup
+  - Create `scripts/common/engine_setup.py` for WS/REST build steps
+  - Create `scripts/run/start_engine.py` as new CLI entry point
+  - Simplify `scripts/run/arbitrage_engine.py` to a core class
 
 ## Next
 
+- [ ] #19 — Refactor `PositionRuntime` to use `@dataclass` for state management
+- [ ] #20 — Clean up `position_polling.py` utility redundancies
+- [ ] #21 — Polish `docs/position_monitoring.md` documentation
 - [ ] #8 — Write `NormalizedBookRuntime` test suite (6+ cases) — 1-2 hrs
 - [ ] #9 — Lag timestamp precision detection (`Improve_lag.md` #1 + #6) — 1 hr
 - [ ] #10 — Rolling lag stats in health snapshots (`Improve_lag.md` #3) — 1 hr, depends on #9
@@ -36,11 +46,8 @@ How this file is structured:
 
 ## Later
 
-- [ ] #12 — Design position monitoring system (order status polling, fill tracking, net position)
 - [ ] #13 — Implement Kalshi order status polling client
 - [ ] #14 — Implement Polymarket order status polling client
-- [ ] #15 — Build `PositionRuntime` — tracks open positions, fills, and net exposure
-- [ ] #16 — Integrate position monitoring into engine loop
 - [ ] #17 — Add portfolio-level max exposure limit
 
 ## Blocked
