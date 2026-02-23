@@ -1,4 +1,4 @@
-# Buy Execution Design (Inline FSM) - Current Implementation
+# Buy Execution Design (Inline FSM) - Implementation (22/02/2026)
 
 This document describes the buy path as it is currently implemented in:
 
@@ -20,12 +20,6 @@ Implemented:
   - explicit opt-in (`--enable-buy-execution`)
   - max attempts per run (default `1`)
   - FSM gate
-
-Out of scope (still):
-
-- Hedge/unwind strategy.
-- Portfolio follow-up logic after partial one-sided fills.
-- Durable idempotency storage (state is process-local).
 
 ## Current Order Policy
 

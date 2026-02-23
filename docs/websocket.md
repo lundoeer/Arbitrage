@@ -1,6 +1,6 @@
-# Websocket Implementation (Current)
+# Websocket Implementation (22/02/2026)
 
-This document describes the current websocket implementation used by:
+This document describes the websocket implementation used by:
 
 - `scripts/run/start_engine.py` / `engine_loop.py` (production engine, default no file logging)
 - `scripts/diagnostic/log_pair_price_depth_health.py` (diagnostic sampler)

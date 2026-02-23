@@ -44,6 +44,8 @@ async def run_core_loop(
     max_attempts = max(0, int(buy_execution_max_attempts))
     if "attempts_used" not in buy_execution_attempt_state:
         buy_execution_attempt_state["attempts_used"] = 0
+    if "submission_seq" not in buy_execution_attempt_state:
+        buy_execution_attempt_state["submission_seq"] = 0
     stats: Dict[str, Any] = {
         "decision_samples": 0,
         "can_trade_true_samples": 0,
@@ -207,14 +209,18 @@ async def run_core_loop(
                     }
                 else:
                     plan_payload = dict(decision.execution_plan)
-                    signal_id = str(plan_payload.get("signal_id") or "").strip()
-                    if not signal_id:
+                    base_signal_id = str(plan_payload.get("signal_id") or "").strip()
+                    if not base_signal_id:
                         stats["buy_execution_errors"] += 1
                         buy_execution_event = {
                             "status": "error",
                             "reason": "execution_plan_missing_signal_id",
                         }
                     else:
+                        submission_seq = int(buy_execution_attempt_state.get("submission_seq", 0)) + 1
+                        buy_execution_attempt_state["submission_seq"] = int(submission_seq)
+                        signal_id = f"{base_signal_id}__s{submission_seq}"
+                        plan_payload["signal_id"] = signal_id
                         buy_fsm.begin_submission(
                             signal_id=signal_id,
                             now_epoch_ms=now_epoch_ms,

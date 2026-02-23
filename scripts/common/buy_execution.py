@@ -90,9 +90,7 @@ class BuyExecutionLeg:
             size=float(size),
             limit_price=_as_float(payload.get("limit_price")),
             time_in_force=(
-                None
-                if payload.get("time_in_force") is None
-                else str(payload.get("time_in_force")).strip().lower()
+                None if payload.get("time_in_force") is None else str(payload.get("time_in_force")).strip().lower()
             ),
             client_order_id_seed=(
                 None
@@ -219,8 +217,7 @@ class BuyIdempotencyState:
     """
     In-memory idempotency state.
 
-    First implementation is process-local by design. This can later move to a
-    durable store for restart safety.
+    Implementation is process-local by design.
     """
 
     def __init__(self) -> None:
@@ -496,9 +493,7 @@ def _polymarket_l1_private_key_from_env() -> str:
     value = str(os.getenv("POLYMARKET_L1_APIKEY", "") or "").strip()
     if value:
         return value
-    raise RuntimeError(
-        "Missing Polymarket L1 private key in env (POLYMARKET_L1_APIKEY)"
-    )
+    raise RuntimeError("Missing Polymarket L1 private key in env (POLYMARKET_L1_APIKEY)")
 
 
 def _polymarket_l2_creds_from_env() -> Tuple[str, str, str]:
@@ -557,9 +552,7 @@ def _polymarket_market_buy_price_cap_from_env(default: float = 0.99) -> float:
     except Exception as exc:
         raise RuntimeError(f"Invalid POLYMARKET_MARKET_BUY_PRICE_CAP value: {raw}") from exc
     if value <= 0.0 or value > 1.0:
-        raise RuntimeError(
-            f"Invalid POLYMARKET_MARKET_BUY_PRICE_CAP value: {raw} (expected >0 and <=1)"
-        )
+        raise RuntimeError(f"Invalid POLYMARKET_MARKET_BUY_PRICE_CAP value: {raw} (expected >0 and <=1)")
     return float(value)
 
 
@@ -619,9 +612,7 @@ def _fetch_polymarket_exchange_nonce(*, clob_client: Any, nonce_address: str) ->
         from py_clob_client.config import get_contract_config
         from py_clob_client.constants import POLYGON
     except Exception as exc:
-        raise RuntimeError(
-            "Missing py-clob-client components required for Polymarket nonce lookup."
-        ) from exc
+        raise RuntimeError("Missing py-clob-client components required for Polymarket nonce lookup.") from exc
 
     contract_config = get_contract_config(POLYGON)
     if contract_config is None:
@@ -666,8 +657,7 @@ def _fetch_polymarket_exchange_nonce(*, clob_client: Any, nonce_address: str) ->
             errors.append(f"{url}: {type(exc).__name__}: {exc}")
 
     raise RuntimeError(
-        "Polymarket nonce lookup failed across RPC endpoints. "
-        f"Errors: {' | '.join(errors) if errors else 'unknown'}"
+        f"Polymarket nonce lookup failed across RPC endpoints. Errors: {' | '.join(errors) if errors else 'unknown'}"
     )
 
 
@@ -819,9 +809,7 @@ def derive_polymarket_funder_from_chain(
         from py_clob_client.config import get_contract_config
         from py_clob_client.constants import POLYGON
     except Exception as exc:
-        raise RuntimeError(
-            "Missing py-clob-client components required for Polymarket funder lookup."
-        ) from exc
+        raise RuntimeError("Missing py-clob-client components required for Polymarket funder lookup.") from exc
 
     probe = ClobClient(
         host=str(base_url).rstrip("/"),
@@ -894,9 +882,7 @@ def _build_polymarket_clob_context_from_env(
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import ApiCreds, MarketOrderArgs, OrderArgs
     except Exception as exc:
-        raise RuntimeError(
-            "Missing dependency py-clob-client. Install it to enable Polymarket order signing."
-        ) from exc
+        raise RuntimeError("Missing dependency py-clob-client. Install it to enable Polymarket order signing.") from exc
 
     l1_key = _polymarket_l1_private_key_from_env()
     l2_key, l2_secret, l2_passphrase = _polymarket_l2_creds_from_env()

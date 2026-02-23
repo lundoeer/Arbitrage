@@ -32,19 +32,24 @@ How this file is structured:
 
 ## Now
 
-- [ ] #8 — Write `NormalizedBookRuntime` test suite (6+ cases) — 1-2 hrs
+awaiting user decision
 
 ## Next
+
+- [ ] #29 - Create a script that looks at the currently avialable data\account_portfolio_snapshot_logs and shows all changes in the time, kalshi and polymarket balances and the total of the two with only these four fields pr. line an only new lines when there are changes. also kalshi and polymarket balances need to be converted to dollars currently kalshi is in cents and polymarket is in milicents i think.
+- [ ] #22 - Implement sizing based on mainly on current best_size but maybe also book
+- [ ] #23 -Implement minimum sizing so both sides of the trade is above a configurable threshold.
+- [ ] #24 -Implement selling positions based on bids - this should also check size
+- [ ] #25 -Implement order monitoring and cancellations - this is hopefully not super relevant with the current order types, but i need to know if i have any orders in place.
+- [ ] #26 -Implement hedging based on positions and a check for unfilled orders. Integrated with drift_tolerance
+- [ ] #27 -Implement states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed. Maybe the current FSM is already handeling this otherwise consider if this is new or a change to FSM where does this belong? Maybe it is logic to go from Awaiting_result to cooldown currently it just auto moves as far as i can see.
+- [ ] #28 -Implement max exposture per market -> if over all buying blocked on that market.
+
+## Later
 
 - [ ] #9 — Lag timestamp precision detection (`Improve_lag.md` #1 + #6) — 1 hr
 - [ ] #10 — Rolling lag stats in health snapshots (`Improve_lag.md` #3) — 1 hr, depends on #9
 - [ ] #11 — Partial-submit alert (stderr on `partially_submitted`) — 10 min
-
-## Later
-
-- [ ] #13 — Implement Kalshi order status polling client
-- [ ] #14 — Implement Polymarket order status polling client
-- [ ] #17 — Add portfolio-level max exposure limit
 
 ## Blocked
 

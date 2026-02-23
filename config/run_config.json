@@ -14,14 +14,14 @@
     "target_market": ""
   },
   "buy": {
-    "min_gross_edge_threshold": 0.04,
+    "min_gross_edge_threshold": 0.05,
     "max_spend_per_market_usd": 10.0,
     "max_size_cap_per_leg": 20.0
   },
   "buy_execution": {
     "enabled": true,
-    "cooldown_ms": 120000,
-    "max_attempts_per_run": 1,
+    "cooldown_ms": 30000,
+    "max_attempts_per_run": 2,
     "api_retry": {
       "enabled": true,
       "max_attempts": 3,
