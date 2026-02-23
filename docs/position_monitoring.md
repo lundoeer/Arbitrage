@@ -1,11 +1,11 @@
-# Position Monitoring Implementation Plan
+# Position Monitoring Architecture
 
 Last updated: 2026-02-22  
-Task: #12 (design)
+Scope: Cross-venue Position Reconciliation & Tracking
 
 ## Objective
 
-Build a position monitoring system that combines:
+The position monitoring system combines:
 
 1. Order submit responses (`execute_cross_venue_buy` results) for immediate in-memory updates.
 2. Polymarket user websocket channel for continuous order/trade lifecycle updates.
@@ -13,25 +13,22 @@ Build a position monitoring system that combines:
 4. Kalshi `market_positions` websocket channel for continuous position updates.
 5. Kalshi portfolio positions REST endpoint for periodic reconciliation.
 
-This aligns with your proposed architecture: fast streaming updates + periodic authoritative checks.
+This hybrid model enables fast streaming updates gated by periodic authoritative checks.
 
-## Confirmed Decisions (Resolved)
+## Design Constraints & Decisions
 
 1. Polymarket user-channel subscription is scoped to the active Polymarket market for the current discovered pair.
-2. Discovery output must include Polymarket `conditionId`.
+2. Discovery output includes the Polymarket `conditionId` mapping.
 3. Polymarket fill delta is applied only on `CONFIRMED` trade lifecycle state.
 4. Startup is fail-closed for buy execution if initial position bootstrap fails, with automatic re-enable once later position polls succeed.
-5. Monitoring scope is only the currently selected pair, not account-wide positions.
-6. State remains in-memory only, with REST bootstrap/reconciliation (no persisted local state).
+5. Monitoring scope is strictly the currently selected pair, not account-wide positions.
+6. State remains in-memory only, with REST bootstrap/reconciliation acting as the recovery mechanism (no persisted local database state).
 
-## Key Design Decision
+## Key Architecture
 
-Use a hybrid model:
+The hybrid model pairs low-latency event-driven updates with periodic snapshot reconciliation for correctness.
 
-- Event-driven updates for low latency.
-- Periodic snapshot reconciliation for correctness.
-
-No dedicated Polymarket position websocket appears to exist. The user channel provides `order` and `trade` events, so Polymarket position state must be inferred from fills and reconciled against REST snapshots.
+Since no dedicated Polymarket position websocket exists, the user channel's `order` and `trade` events are normalized, and Polymarket position state is inferred from confirmed fills and reconciled against REST snapshots.
 
 ## Source Roles and Trust Order
 
@@ -42,7 +39,7 @@ No dedicated Polymarket position websocket appears to exist. The user channel pr
   trust: low for filled size
 
 - `Source B`: user channel `trade` / `order`  
-  role: near-real-time fill lifecycle  
+  role: near-real-time fill lifecycle tracking  
   trust: medium (event-ordering and retries can happen)
 
 - `Source C`: `GET /positions`  
@@ -63,44 +60,27 @@ No dedicated Polymarket position websocket appears to exist. The user channel pr
   role: authoritative reconciliation and recovery  
   trust: high
 
-## Proposed Runtime Architecture
+## Module Layout
 
-### New modules
-
-- `scripts/common/position_runtime.py`
-- `scripts/common/position_polling.py`
-- `scripts/common/position_monitoring.py` (small orchestration helpers)
-
-### Extend existing modules
-
-- `scripts/common/ws_collectors.py`
-  add:
-  - `PolymarketUserWsCollector`
-  - `KalshiMarketPositionsWsCollector`
-
-- `scripts/common/ws_normalization.py`
-  add:
-  - `normalize_polymarket_user_event(...)`
-  - `normalize_kalshi_market_positions_event(...)`
-
-- `scripts/common/run_config.py`
-  add `PositionMonitoringConfig` loaders.
-
-- `scripts/run/engine_cli.py`
-  add CLI flags for position monitoring enablement and intervals.
-
-- `scripts/run/arbitrage_engine.py`
-  wire runtime + collectors + poll loop + logging + summary counters.
+- `scripts/common/position_runtime.py`: `PositionRuntime` maintains the canonical per-venue state, orders, and health metrics using strict `@dataclass` structures.
+- `scripts/common/position_polling.py`: Contains API polling clients and the periodic `PositionReconcileLoop`.
+- `scripts/common/ws_collectors.py`: Houses `PolymarketUserWsCollector` and `KalshiMarketPositionsWsCollector`.
+- `scripts/run/arbitrage_engine.py`: Wires runtime instances, collectors, the polling loop, and health gates.
+- `scripts/common/engine_setup.py`: Constructs position components based on configuration.
 
 ## Canonical In-Memory Model
 
-### `PositionRuntime` state
+### `PositionState` structure
 
-- `positions_by_key`: canonical per-venue position state.
-- `orders_by_client_order_id`: pending/filled/rejected order lifecycle.
-- `event_dedupe`: recent event IDs/hashes to prevent double-apply.
-- `last_reconcile_at_ms` per venue.
-- `health`: stale/drift/error indicators.
+The canonical position state tracked by `PositionRuntime`:
+
+- `net_contracts`: Current net held quantity
+- `avg_entry_price`: Computed VWAP of entry
+- `realized_pnl`: (if available from venue sources)
+- `fees`: (if available)
+- `last_update_ms`: Timestamp
+- `last_source`: (`submit_ack`, `user_ws`, `positions_ws`, `positions_poll`)
+- `is_authoritative`: true when set from trusted snapshot/ws position source
 
 ### Canonical position key
 
@@ -108,19 +88,9 @@ No dedicated Polymarket position websocket appears to exist. The user channel pr
 - `instrument_id`: Polymarket token ID or Kalshi ticker
 - `outcome_side`: `yes` or `no`
 
-### Canonical position fields
-
-- `net_contracts`
-- `avg_entry_price`
-- `realized_pnl` (if available from venue sources)
-- `fees` (if available)
-- `last_update_ms`
-- `last_source` (`submit_ack`, `user_ws`, `positions_ws`, `positions_poll`)
-- `is_authoritative` (true when set from trusted snapshot/ws position source)
-
 ## Update and Reconciliation Rules
 
-### Rule 1: submit-response ingestion (source 1)
+### Rule 1: Submit-response ingestion (source 1)
 
 On `buy_execution` result:
 
@@ -141,7 +111,7 @@ Normalize `trade` and `order` events.
   - update lifecycle status (`LIVE`, `DELAYED`, `MATCHED`, `UNMATCHED`, `MINED`, `CONFIRMED`, `RETRYING`, `FAILED`).
   - update cumulative filled size if provided.
 
-Deduplicate using trade/order IDs + status + size hash.
+Deduplication occurs via trade/order IDs within `PositionRuntime`.
 
 ### Rule 3: Kalshi market_positions ingestion (source 4)
 
@@ -151,9 +121,9 @@ Treat each `market_position` event as an absolute position update.
 - Mark as authoritative.
 - Update order correlation if order identifiers are present.
 
-### Rule 4: periodic REST reconciliation (sources 3 and 5)
+### Rule 4: Periodic REST reconciliation (sources 3 and 5)
 
-Poll both venues on a timer.
+Poll both venues on a configurable timer (e.g. 10s Poly, 20s Kalshi).
 
 - Polymarket:
   - pull current positions by user.
@@ -162,66 +132,35 @@ Poll both venues on a timer.
   - pull portfolio positions (paginate with `cursor`).
   - overwrite canonical Kalshi position values.
 
-After overwrite, clear drift flags for matching keys.
+After overwrite, drift counters are incremented if the state was misaligned, and health flags are cleared.
 
-### Rule 5: drift handling
+### Rule 5: Drift handling
 
-If stream-derived value differs materially from poll snapshot:
+If a stream-derived value differs materially from a poll snapshot:
 
-- mark `drift_detected=true`.
-- emit warning log entry.
-- trust poll snapshot as source of truth.
+- Record drift in counters.
+- Trust the poll snapshot as the absolute source of truth.
 
-## Polling and Freshness Plan
+## Polling and Freshness Strategy
 
 ### Startup bootstrap
 
 Before enabling live buy execution in a segment:
 
 1. Run one Polymarket positions poll.
-2. Run one Kalshi positions poll.
-3. Initialize `PositionRuntime` from those snapshots.
-
-### Continuous cadence
-
-- Polymarket positions poll every `10s` (configurable).
-- Kalshi positions poll every `20s` (configurable).
-- Immediate retry on failure with bounded backoff.
+2. Run one Kalshi positions poll (via the polling loop).
+3. Initialize `PositionRuntime` limits and set health to `buy_execution_allowed=True`.
 
 ### Staleness thresholds
 
-- warning if no authoritative update for a venue in `>60s` (configurable)
-- hard stale state if `>180s` (configurable)
+- `warning_stale` triggers if no authoritative update for a venue occurs in `>60s` (configurable)
+- `hard_stale` state if `>180s` (configurable), blocking execution until it recovers.
 
-## Engine Integration Plan
+## Config and CLI Control
 
-### `scripts/run/arbitrage_engine.py`
+### `config/run_config.json` (Position section)
 
-1. Instantiate `PositionRuntime` at segment start.
-2. Forward every `buy_execution` result into `PositionRuntime.apply_buy_execution_result(...)`.
-3. Start additional tasks:
-   - Polymarket user WS collector task.
-   - Kalshi market_positions WS collector task.
-   - positions poll loop task.
-   - optional position snapshot writer loop task.
-4. Include new summary counters:
-   - position events ingested
-   - poll successes/failures by venue
-   - drift corrections
-   - stale intervals
-5. Keep buy decision loop independent; position monitoring failure should not crash the process.
-6. Add a position health gate in the engine submit path:
-   - `decision.can_trade` remains quote/market-data based.
-   - final buy-submit eligibility becomes `decision.can_trade AND position_runtime.health.buy_execution_allowed`.
-   - `buy_execution_allowed=false` at startup until bootstrap succeeds.
-   - if bootstrap fails initially, block submits (fail-closed).
-   - if later reconciliation polls succeed and health recovers, flip to `buy_execution_allowed=true` without restart.
-
-## Config and CLI Additions
-
-### `config/run_config.json` (new section)
-
-`position_monitoring`:
+The `position_monitoring` config dictionary contains:
 
 - `enabled` (bool)
 - `polymarket_user_ws_enabled` (bool)
@@ -233,79 +172,9 @@ Before enabling live buy execution in a segment:
 - `stale_error_seconds` (int)
 - `require_bootstrap_before_buy` (bool, default true)
 
-### CLI flags
+### Logging Outputs
 
-- `--enable-position-monitoring` / `--no-enable-position-monitoring`
-- `--position-polymarket-poll-seconds`
-- `--position-kalshi-poll-seconds`
-- `--log-positions`
-
-## Logging Outputs
-
-New optional file:
-
-- `data/position_monitoring_log__<run_id>.jsonl`
-
-Recommended event kinds:
-
-- `position_order_submit_ack`
-- `position_polymarket_user_trade`
-- `position_polymarket_user_order`
-- `position_kalshi_market_position`
-- `position_poll_snapshot`
-- `position_drift_correction`
-- `position_health`
-
-## Phased Implementation Steps
-
-1. Phase 1: Core runtime and tests.
-   - Deliver `PositionRuntime` with unit tests for merges, dedupe, drift correction.
-2. Phase 2: Venue ingestion adapters.
-   - Implement user/market_positions collectors + normalizers.
-3. Phase 3: REST poll clients and reconcile loop.
-   - Implement polling clients with pagination and retries.
-4. Phase 4: Engine wiring.
-   - Integrate runtime and loops into `arbitrage_engine.py`.
-5. Phase 5: Observability.
-   - Add logs, counters, summary fields, and stale/drift alerts.
-
-## Discovery and Selection Changes
-
-`scripts/run/discover_active_btc_15m_markets.py` and `scripts/common/market_selection.py` should be extended so selected Polymarket payload includes:
-
-- `condition_id` (from Polymarket `conditionId`)
-
-Engine market context should carry this as:
-
-- `polymarket_condition_id`
-
-Polymarket user-channel collector should subscribe only to this selected condition/market scope, then apply local filtering as a safety check.
-
-## Test Plan
-
-Add:
-
-- `tests/test_position_runtime.py`
-- `tests/test_position_polling.py`
-- `tests/test_position_ws_normalization.py`
-
-Minimum cases:
-
-- submit-response registers pending order
-- polymarket trade dedupe and status transitions
-- polymarket pre-confirm states do not mutate position
-- kalshi market_positions absolute overwrite behavior
-- poll snapshot reconciliation overwrites drifted state
-- kalshi positions pagination merge
-- stale health transitions
-
-Additional test cases (resolved decisions):
-
-- Polymarket trade events with `MATCHED` do not change position.
-- Polymarket trade events with `CONFIRMED` do change position.
-- buy execution is blocked until bootstrap success when `require_bootstrap_before_buy=true`.
-- buy execution auto-unblocks after recovery poll success.
-- only selected-pair instruments are tracked; unrelated instruments are ignored.
+`run_core_loop` optionally writes out periodic `PositionRuntime.snapshot()` state to `data/` if the correct CLI flags are provided (e.g. `--log-positions`), allowing observability of open positions, pending orders, error counts, and drift metrics across the full engine lifecycle.
 
 ## External References
 

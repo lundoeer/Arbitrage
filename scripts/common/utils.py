@@ -22,19 +22,23 @@ def as_dict(value: Any) -> Dict[str, Any]:
 
 
 def as_float(value: Any) -> Optional[float]:
-    """Coerce int/float to float; return None for anything else."""
-    if isinstance(value, (int, float)):
+    """Coerce int/float/str to float; return None for anything else or parsing error."""
+    if value is None:
+        return None
+    try:
         return float(value)
-    return None
+    except (TypeError, ValueError):
+        return None
 
 
 def as_int(value: Any) -> Optional[int]:
-    """Coerce int/float to int; return None for bool or anything else."""
+    """Coerce int/float/str to int; return None for bool or anything else."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    return None
+    try:
+        return int(float(value)) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def as_non_empty_text(value: Any) -> Optional[str]:

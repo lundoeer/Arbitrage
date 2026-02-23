@@ -13,38 +13,7 @@ from scripts.common.buy_execution import (
     _resolve_kalshi_api_key_from_env,
 )
 from scripts.common.position_runtime import PositionRuntime
-from scripts.common.utils import as_dict, as_non_empty_text, now_ms
-
-
-def _to_outcome_side(raw: Any) -> Optional[str]:
-    text = str(raw or "").strip().lower()
-    if text in {"yes", "no"}:
-        return text
-    return None
-
-
-def _to_float(raw: Any) -> Optional[float]:
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except Exception:
-        return None
-
-
-def _build_transport(
-    *,
-    timeout_seconds: int,
-    retry_max_attempts: int,
-    retry_base_backoff_seconds: float,
-    retry_jitter_ratio: float,
-) -> ApiTransport:
-    retry = RetryConfig(
-        max_attempts=max(1, int(retry_max_attempts)),
-        base_backoff_seconds=max(0.0, float(retry_base_backoff_seconds)),
-        jitter_ratio=max(0.0, float(retry_jitter_ratio)),
-    )
-    return ApiTransport(timeout_seconds=max(1, int(timeout_seconds)), retry_config=retry)
+from scripts.common.utils import as_dict, as_non_empty_text, as_float, now_ms
 
 
 @dataclass(frozen=True)
@@ -55,6 +24,14 @@ class PositionPollClientConfig:
     retry_jitter_ratio: float = 0.2
     kalshi_page_limit: int = 100
     kalshi_max_pages: int = 20
+
+    def build_transport(self) -> ApiTransport:
+        retry = RetryConfig(
+            max_attempts=max(1, int(self.retry_max_attempts)),
+            base_backoff_seconds=max(0.0, float(self.retry_base_backoff_seconds)),
+            jitter_ratio=max(0.0, float(self.retry_jitter_ratio)),
+        )
+        return ApiTransport(timeout_seconds=max(1, int(self.timeout_seconds)), retry_config=retry)
 
 
 class PolymarketPositionsPollClient:
@@ -79,12 +56,7 @@ class PolymarketPositionsPollClient:
         self.token_no = str(token_no or "").strip()
         self.base_url = str(base_url).rstrip("/")
         cfg = config or PositionPollClientConfig()
-        self.transport = transport or _build_transport(
-            timeout_seconds=cfg.timeout_seconds,
-            retry_max_attempts=cfg.retry_max_attempts,
-            retry_base_backoff_seconds=cfg.retry_base_backoff_seconds,
-            retry_jitter_ratio=cfg.retry_jitter_ratio,
-        )
+        self.transport = transport or cfg.build_transport()
         if not self.user_address:
             raise RuntimeError("Polymarket positions poll client requires user_address")
         if not self.condition_id:
@@ -110,8 +82,9 @@ class PolymarketPositionsPollClient:
                 continue
             condition = str(item.get("conditionId") or "").strip().lower()
             asset = str(item.get("asset") or "").strip()
-            outcome = _to_outcome_side(item.get("outcome"))
-            size = _to_float(item.get("size"))
+            raw_outcome = as_non_empty_text(item.get("outcome"))
+            outcome = raw_outcome.lower() if raw_outcome else None
+            size = as_float(item.get("size"))
             if size is None:
                 continue
             if condition and condition != self.condition_id:
@@ -231,12 +204,7 @@ class KalshiPositionsPollClient:
         self.api_prefix = "/" + str(api_prefix or "").strip("/").strip()
         cfg = config or PositionPollClientConfig()
         self.config = cfg
-        self.transport = transport or _build_transport(
-            timeout_seconds=cfg.timeout_seconds,
-            retry_max_attempts=cfg.retry_max_attempts,
-            retry_base_backoff_seconds=cfg.retry_base_backoff_seconds,
-            retry_jitter_ratio=cfg.retry_jitter_ratio,
-        )
+        self.transport = transport or cfg.build_transport()
         self.api_key = str(api_key or _resolve_kalshi_api_key_from_env()).strip()
         self.private_key = private_key if private_key is not None else _load_kalshi_private_key_from_env()
         self.headers_factory = headers_factory
@@ -302,21 +270,21 @@ class KalshiPositionsPollClient:
                 if str(item.get("ticker") or "").strip() != self.market_ticker:
                     continue
                 row_count += 1
-                value = _to_float(item.get("position_fp"))
+                value = as_float(item.get("position_fp"))
                 if value is None:
-                    value = _to_float(item.get("position"))
+                    value = as_float(item.get("position"))
                 net_position_total += float(value or 0.0)
 
-                realized = _to_float(item.get("realized_pnl_dollars"))
+                realized = as_float(item.get("realized_pnl_dollars"))
                 if realized is None:
-                    cents = _to_float(item.get("realized_pnl"))
+                    cents = as_float(item.get("realized_pnl"))
                     realized = None if cents is None else float(cents) / 10_000.0
                 if realized is not None:
                     total_realized_pnl_usd = float((total_realized_pnl_usd or 0.0) + realized)
 
-                fees = _to_float(item.get("fees_paid_dollars"))
+                fees = as_float(item.get("fees_paid_dollars"))
                 if fees is None:
-                    cents = _to_float(item.get("fees_paid"))
+                    cents = as_float(item.get("fees_paid"))
                     fees = None if cents is None else float(cents) / 10_000.0
                 if fees is not None:
                     total_fees_paid_usd = float((total_fees_paid_usd or 0.0) + fees)

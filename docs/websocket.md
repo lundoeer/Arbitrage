@@ -2,7 +2,7 @@
 
 This document describes the current websocket implementation used by:
 
-- `scripts/run/arbitrage_engine.py` (production engine, default no file logging)
+- `scripts/run/start_engine.py` / `engine_loop.py` (production engine, default no file logging)
 - `scripts/diagnostic/log_pair_price_depth_health.py` (diagnostic sampler)
 
 It is intentionally implementation-specific. It focuses on how this code parses fields, mutates runtime state, and writes saved outputs.
@@ -54,7 +54,7 @@ Per incoming websocket frame:
 5. Runtime state updates via `on_event(...)` callback.
 6. If logging sink is enabled, raw and normalized payloads are written.
 
-Decision loop (`arbitrage_engine.py`):
+Decision loop (`engine_loop.py`):
 
 1. Read stream health snapshots.
 2. Read runtime quote snapshot.
@@ -387,7 +387,7 @@ Memory mutation:
 
 ## Memory -> Saved Output
 
-Engine (`scripts/run/arbitrage_engine.py`):
+Engine (`scripts/run/engine_loop.py`):
 
 - default: no raw/events are written
 - with `--log-raw-events`: raw/events and one summary are written

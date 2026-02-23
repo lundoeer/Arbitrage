@@ -5,7 +5,7 @@ This document describes the buy path as it is currently implemented in:
 - `scripts/common/decision_runtime.py`
 - `scripts/common/buy_execution.py` (includes `_post_order_with_retry` for Polymarket retry)
 - `scripts/common/buy_fsm.py` (`BuyFsmRuntime` + `BuyFsmState`)
-- `scripts/run/arbitrage_engine.py` (orchestration)
+- `scripts/run/engine_loop.py` (orchestration)
 
 ## Scope and Intent
 
@@ -141,7 +141,7 @@ Run summary JSON includes buy execution counters and final FSM snapshot.
 
 ## End-to-End Run Flow (Buy Decision -> API Response Handling)
 
-1. Engine poll loop ticks in `_decision_loop` in `scripts/run/arbitrage_engine.py`.
+1. Engine poll loop ticks in `_decision_loop` in `scripts/run/engine_loop.py`.
 2. FSM executes `maybe_rearm(...)` to move `COOLDOWN` back to `IDLE` when elapsed.
 3. Engine reads health snapshots from Kalshi and Polymarket collectors.
 4. Engine reads latest normalized quotes from `SharePriceRuntime`.

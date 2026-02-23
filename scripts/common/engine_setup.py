@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from scripts.common.api_transport import ApiTransport, RetryConfig
@@ -16,7 +17,6 @@ from scripts.common.position_polling import (
     PositionPollClientConfig,
 )
 from scripts.common.run_config import BuyExecutionRuntimeConfig
-from scripts.common.utils import get_env_or_none
 from scripts.common.ws_collectors import (
     KalshiMarketPositionsWsCollector,
     KalshiWsCollector,
@@ -74,7 +74,7 @@ def build_buy_execution_clients(
 
 def resolve_polymarket_position_user_address_from_env() -> str:
     for key in ("POLYMARKET_FUNDER", "POLYMARKET_ADDRESS", "POLYMARKET_SIGNER_ADDRESS"):
-        value = get_env_or_none(key)
+        value = str(os.getenv(key, "") or "").strip()
         if value:
             return value
     return ""
@@ -93,6 +93,10 @@ def build_position_components(
     health_config: Optional[WsHealthConfig],
     on_pm_user_event: Any,
     on_kx_market_position_event: Any,
+    pm_user_raw_writer: Any = None,
+    pm_user_event_writer: Any = None,
+    kx_market_positions_raw_writer: Any = None,
+    kx_market_positions_event_writer: Any = None,
 ) -> tuple[
     Optional[PolymarketPositionsPollClient],
     Optional[PolymarketAccountPollClient],
@@ -148,8 +152,8 @@ def build_position_components(
             try:
                 pm_user_collector = PolymarketUserWsCollector(
                     condition_id=pm_condition_id,
-                    raw_writer=NullWriter(),
-                    event_writer=NullWriter(),
+                    raw_writer=pm_user_raw_writer if pm_user_raw_writer is not None else NullWriter(),
+                    event_writer=pm_user_event_writer if pm_user_event_writer is not None else NullWriter(),
                     health_config=health_config,
                     on_event=on_pm_user_event,
                 )
@@ -161,8 +165,8 @@ def build_position_components(
                 kx_market_positions_collector = KalshiMarketPositionsWsCollector(
                     market_ticker=kx_ticker,
                     headers_factory=resolve_kalshi_ws_headers,
-                    raw_writer=NullWriter(),
-                    event_writer=NullWriter(),
+                    raw_writer=kx_market_positions_raw_writer if kx_market_positions_raw_writer is not None else NullWriter(),
+                    event_writer=kx_market_positions_event_writer if kx_market_positions_event_writer is not None else NullWriter(),
                     health_config=health_config,
                     on_event=on_kx_market_position_event,
                 )

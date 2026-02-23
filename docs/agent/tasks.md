@@ -25,21 +25,17 @@ How this file is structured:
 - [x] #12 — Design position monitoring system (order status polling, fill tracking, net position)
 - [x] #15 — Build `PositionRuntime` — tracks open positions, fills, and net exposure
 - [x] #16 — Integrate position monitoring into engine loop
+- [x] #18 — Refactor Engine Architecture
+- [x] #19 — Refactor `PositionRuntime` to use `@dataclass` for state management
+- [x] #20 — Clean up `position_polling.py` utility redundancies
+- [x] #21 — Polish `docs/position_monitoring.md` documentation
 
 ## Now
 
-- [/] #18 — Refactor Engine Architecture
-  - Create `scripts/common/engine_logger.py` for logging setup
-  - Create `scripts/common/engine_setup.py` for WS/REST build steps
-  - Create `scripts/run/start_engine.py` as new CLI entry point
-  - Simplify `scripts/run/arbitrage_engine.py` to a core class
+- [ ] #8 — Write `NormalizedBookRuntime` test suite (6+ cases) — 1-2 hrs
 
 ## Next
 
-- [ ] #19 — Refactor `PositionRuntime` to use `@dataclass` for state management
-- [ ] #20 — Clean up `position_polling.py` utility redundancies
-- [ ] #21 — Polish `docs/position_monitoring.md` documentation
-- [ ] #8 — Write `NormalizedBookRuntime` test suite (6+ cases) — 1-2 hrs
 - [ ] #9 — Lag timestamp precision detection (`Improve_lag.md` #1 + #6) — 1 hr
 - [ ] #10 — Rolling lag stats in health snapshots (`Improve_lag.md` #3) — 1 hr, depends on #9
 - [ ] #11 — Partial-submit alert (stderr on `partially_submitted`) — 10 min

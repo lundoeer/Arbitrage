@@ -11,10 +11,10 @@ Cross-venue binary options arbitrage between **Polymarket** (CLOB) and **Kalshi*
 .venv\Scripts\python.exe -m scripts.run.discover_active_btc_15m_markets
 
 # Run engine (no trading, with summary)
-.venv\Scripts\python.exe -m scripts.run.arbitrage_engine --duration-seconds 300 --no-enable-buy-execution --log-summary
+.venv\Scripts\python.exe -m scripts.run.start_engine --duration-seconds 300 --no-enable-buy-execution --log-summary
 
 # Run engine with full logging
-.venv\Scripts\python.exe -m scripts.run.arbitrage_engine --duration-seconds 300 --no-enable-buy-execution --log-summary --log-raw-events --log-decisions --log-edge-snapshots --log-runtime-memory
+.venv\Scripts\python.exe -m scripts.run.start_engine --duration-seconds 300 --no-enable-buy-execution --log-summary --log-raw-events --log-decisions --log-edge-snapshots --log-runtime-memory --log-positions
 ```
 
 ## Project Layout
@@ -22,16 +22,22 @@ Cross-venue binary options arbitrage between **Polymarket** (CLOB) and **Kalshi*
 ```
 scripts/
 ├── run/                    # Executable entry points
-│   ├── arbitrage_engine.py       # Main engine — segment loop, WS lifecycle, decision loop
+│   ├── start_engine.py           # Main CLI entry point — parses config, builds clients, starts engine loop
+│   ├── arbitrage_engine.py       # Core class wrapper defining runtime limits and segment loops
+│   ├── engine_loop.py            # Inner asyncio event loops for components
 │   ├── engine_cli.py             # CLI argument parser (build_parser)
 │   └── discover_active_btc_15m_markets.py
 ├── common/                 # Shared modules
+│   ├── engine_setup.py           # Factory components for building Kalshi/Polymarket WS/REST instances
+│   ├── engine_logger.py          # Orchestrates writing JSONL execution and decision logs
 │   ├── utils.py                  # Shared helpers (now_ms, as_dict, as_float, etc.)
 │   ├── buy_fsm.py                # BuyFsmRuntime + BuyFsmState (FSM for buy execution)
 │   ├── edge_snapshots.py         # Edge snapshot computation
 │   ├── buy_execution.py          # Cross-venue order submission
 │   ├── decision_runtime.py       # DecisionRuntime — quote sanity, candidate scoring
 │   ├── normalized_books.py       # In-memory order books (4 legs)
+│   ├── position_runtime.py       # In-memory tracking of net positions and fills
+│   ├── position_polling.py       # REST pollers for base portfolio snapshots
 │   ├── ws_transport.py           # BaseWsCollector — WS connection lifecycle
 │   ├── ws_collectors.py          # KalshiWsCollector, PolymarketWsCollector
 │   ├── ws_normalization.py       # Raw → normalized event mapping
@@ -63,13 +69,13 @@ Selection logic: market status is active, `window_end` is in the future, and clo
 
 ```powershell
 # Bounded run, no trading
-.venv\Scripts\python.exe -m scripts.run.arbitrage_engine --duration-seconds 60 --no-enable-buy-execution
+.venv\Scripts\python.exe -m scripts.run.start_engine --duration-seconds 60 --no-enable-buy-execution
 
 # With raw WebSocket logging
-.venv\Scripts\python.exe -m scripts.run.arbitrage_engine --duration-seconds 60 --log-raw-events
+.venv\Scripts\python.exe -m scripts.run.start_engine --duration-seconds 60 --log-raw-events
 
 # Skip discovery (use cached pair — only if cache is fresh)
-.venv\Scripts\python.exe -m scripts.run.arbitrage_engine --duration-seconds 60 --skip-discovery
+.venv\Scripts\python.exe -m scripts.run.start_engine --duration-seconds 60 --skip-discovery
 ```
 
 **Caution**: `--skip-discovery` requires a fresh `data/market_pair_cache.json`. If the cache contains expired market windows, the engine will find no active segments and exit with 0 messages.
@@ -79,6 +85,7 @@ Engine outputs (in `data/`):
 - `arbitrage_engine_summary__*.json` — run summary with message counts, health, quotes
 - `decision_log__*.jsonl` — per-tick decision samples
 - `gross_edge_snapshot__*.jsonl` — edge snapshot log
+- `position_monitoring_log__*.jsonl` — periodic position snapshots
 - `websocket_share_price_runtime__*.jsonl` — 1s book state snapshots
 - `websocket_kalshi/raw_engine__*.jsonl` — raw Kalshi WS frames
 - `websocket_poly/raw_engine__*.jsonl` — raw Polymarket WS frames

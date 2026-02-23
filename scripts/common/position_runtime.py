@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict as dataclass_asdict
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from collections import deque
@@ -23,6 +23,35 @@ class PositionRuntimeConfig:
     stale_warning_seconds: int = 60
     stale_error_seconds: int = 180
     dedupe_max_events: int = 10_000
+
+
+@dataclass
+class PositionState:
+    venue: str
+    instrument_id: str
+    outcome_side: str
+    net_contracts: float = 0.0
+    avg_entry_price: Optional[float] = None
+    realized_pnl: Optional[float] = None
+    fees: Optional[float] = None
+    last_update_ms: int = 0
+    last_source: str = "init"
+    is_authoritative: bool = False
+
+
+@dataclass
+class OrderState:
+    client_order_id: str
+    signal_id: str
+    venue: str
+    instrument_id: str
+    outcome_side: str
+    submitted: bool
+    status: str
+    error: Optional[str] = None
+    order_id: Optional[str] = None
+    first_seen_ms: int = 0
+    last_update_ms: int = 0
 
 
 class PositionRuntime:
@@ -49,8 +78,8 @@ class PositionRuntime:
         self.config = config or PositionRuntimeConfig()
         self._known_events: set[str] = set()
         self._known_event_order: Deque[str] = deque()
-        self.positions_by_key: Dict[str, Dict[str, Any]] = {}
-        self.orders_by_client_order_id: Dict[str, Dict[str, Any]] = {}
+        self.positions_by_key: Dict[str, PositionState] = {}
+        self.orders_by_client_order_id: Dict[str, OrderState] = {}
         self._counters: Dict[str, int] = {
             "deduped_events": 0,
             "drift_corrections": 0,
@@ -85,18 +114,12 @@ class PositionRuntime:
         self.health: Dict[str, Any] = {}
         for key in self._tracked_keys:
             venue, instrument_id, outcome_side = key.split("|", 2)
-            self.positions_by_key[key] = {
-                "venue": venue,
-                "instrument_id": instrument_id,
-                "outcome_side": outcome_side,
-                "net_contracts": 0.0,
-                "avg_entry_price": None,
-                "realized_pnl": None,
-                "fees": None,
-                "last_update_ms": ts,
-                "last_source": "init",
-                "is_authoritative": False,
-            }
+            self.positions_by_key[key] = PositionState(
+                venue=venue,
+                instrument_id=instrument_id,
+                outcome_side=outcome_side,
+                last_update_ms=ts,
+            )
         self._refresh_health(now_epoch_ms=ts)
 
     def _record_event_id(self, event_id: Optional[str]) -> bool:
@@ -251,19 +274,19 @@ class PositionRuntime:
         ts = int(now_epoch_ms if now_epoch_ms is not None else now_ms())
         key = _position_key(venue=venue_norm, instrument_id=instrument, outcome_side=side_norm)
         rec = self.positions_by_key[key]
-        prior_net = float(rec.get("net_contracts") or 0.0)
-        prior_avg = as_float(rec.get("avg_entry_price"))
+        prior_net = float(rec.net_contracts)
+        prior_avg = rec.avg_entry_price
         delta = float(delta_contracts)
-        rec["net_contracts"] = float(prior_net + delta)
-        rec["avg_entry_price"] = self._merged_avg_entry_price(
+        rec.net_contracts = float(prior_net + delta)
+        rec.avg_entry_price = self._merged_avg_entry_price(
             prior_net=prior_net,
             prior_avg=prior_avg,
             delta_contracts=delta,
             fill_price=fill_price,
         )
-        rec["last_update_ms"] = ts
-        rec["last_source"] = str(source)
-        rec["is_authoritative"] = bool(authoritative)
+        rec.last_update_ms = ts
+        rec.last_source = str(source)
+        rec.is_authoritative = bool(authoritative)
         self._refresh_health(now_epoch_ms=ts)
         return True
 
@@ -315,11 +338,11 @@ class PositionRuntime:
         ts = int(now_epoch_ms if now_epoch_ms is not None else now_ms())
         key = _position_key(venue=venue, instrument_id=instrument, outcome_side=side)
         rec = self.positions_by_key[key]
-        rec["net_contracts"] = float(as_float(net_contracts) or 0.0)
-        rec["avg_entry_price"] = as_float(avg_entry_price)
-        rec["last_update_ms"] = ts
-        rec["last_source"] = "positions_ws"
-        rec["is_authoritative"] = True
+        rec.net_contracts = float(as_float(net_contracts) or 0.0)
+        rec.avg_entry_price = as_float(avg_entry_price)
+        rec.last_update_ms = ts
+        rec.last_source = "positions_ws"
+        rec.is_authoritative = True
         self._refresh_health(now_epoch_ms=ts)
         return True
 
@@ -348,22 +371,22 @@ class PositionRuntime:
             if prior is None:
                 first_seen_ms = ts
             else:
-                first_seen_ms = int(prior.get("first_seen_ms") or ts)
+                first_seen_ms = int(prior.first_seen_ms)
 
             status = "submitted" if submitted else "submit_error"
-            self.orders_by_client_order_id[client_order_id] = {
-                "client_order_id": client_order_id,
-                "signal_id": signal_id,
-                "venue": venue,
-                "instrument_id": instrument_id,
-                "outcome_side": side,
-                "submitted": bool(submitted),
-                "status": status,
-                "error": error,
-                "order_id": self._extract_order_id(response_payload),
-                "first_seen_ms": first_seen_ms,
-                "last_update_ms": ts,
-            }
+            self.orders_by_client_order_id[client_order_id] = OrderState(
+                client_order_id=client_order_id,
+                signal_id=signal_id,
+                venue=venue,
+                instrument_id=instrument_id,
+                outcome_side=side,
+                submitted=bool(submitted),
+                status=status,
+                error=error,
+                order_id=self._extract_order_id(response_payload),
+                first_seen_ms=first_seen_ms,
+                last_update_ms=ts,
+            )
             accepted += 1
             self._counters["order_submit_acks"] += 1
 
@@ -436,16 +459,16 @@ class PositionRuntime:
         for key in venue_keys:
             rec = self.positions_by_key[key]
             target = parsed_targets.get(key, {"net_contracts": 0.0, "avg_entry_price": None})
-            prior_net = float(rec.get("net_contracts") or 0.0)
+            prior_net = float(rec.net_contracts)
             target_net = float(target.get("net_contracts") or 0.0)
             if abs(prior_net - target_net) > tolerance:
                 drift_corrections += 1
                 self._counters["drift_corrections"] += 1
-            rec["net_contracts"] = target_net
-            rec["avg_entry_price"] = as_float(target.get("avg_entry_price"))
-            rec["last_update_ms"] = ts
-            rec["last_source"] = "positions_poll"
-            rec["is_authoritative"] = True
+            rec.net_contracts = target_net
+            rec.avg_entry_price = as_float(target.get("avg_entry_price"))
+            rec.last_update_ms = ts
+            rec.last_source = "positions_poll"
+            rec.is_authoritative = True
             applied += 1
 
         state = self._venue_state[venue_norm]
@@ -471,13 +494,14 @@ class PositionRuntime:
 
     def position(self, *, venue: str, instrument_id: str, outcome_side: str) -> Dict[str, Any]:
         key = _position_key(venue=venue, instrument_id=instrument_id, outcome_side=outcome_side)
-        return dict(self.positions_by_key.get(key) or {})
+        rec = self.positions_by_key.get(key)
+        return dataclass_asdict(rec) if rec else {}
 
     def snapshot(self, *, now_epoch_ms: Optional[int] = None) -> Dict[str, Any]:
         self._refresh_health(now_epoch_ms=now_epoch_ms)
         return {
-            "positions_by_key": {key: dict(value) for key, value in self.positions_by_key.items()},
-            "orders_by_client_order_id": {key: dict(value) for key, value in self.orders_by_client_order_id.items()},
+            "positions_by_key": {key: dataclass_asdict(value) for key, value in self.positions_by_key.items()},
+            "orders_by_client_order_id": {key: dataclass_asdict(value) for key, value in self.orders_by_client_order_id.items()},
             "counters": dict(self._counters),
             "health": dict(self.health),
         }

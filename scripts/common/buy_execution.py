@@ -326,7 +326,7 @@ def _kalshi_time_in_force(value: Optional[str]) -> str:
     raw = str(value or "").strip().lower()
     if raw in {"fok", "fill_or_kill"}:
         return "fill_or_kill"
-    if raw in {"ioc", "immediate_or_cancel"}:
+    if raw in {"fak", "ioc", "immediate_or_cancel"}:
         return "immediate_or_cancel"
     if raw in {"gtc", "good_til_cancelled", "good_till_cancelled"}:
         return "good_til_cancelled"

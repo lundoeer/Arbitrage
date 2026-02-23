@@ -47,8 +47,8 @@ def test_apply_buy_execution_result_merges_submit_acks_without_fill_change() -> 
     accepted = runtime.apply_buy_execution_result(result_payload=payload, now_epoch_ms=1_500)
     assert accepted == 2
     assert len(runtime.orders_by_client_order_id) == 2
-    assert runtime.orders_by_client_order_id["cid-pm-1"]["order_id"] == "pm-order-1"
-    assert runtime.orders_by_client_order_id["cid-kx-1"]["order_id"] == "kx-order-1"
+    assert runtime.orders_by_client_order_id["cid-pm-1"].order_id == "pm-order-1"
+    assert runtime.orders_by_client_order_id["cid-kx-1"].order_id == "kx-order-1"
     assert runtime.position(venue="polymarket", instrument_id="pm_yes_token", outcome_side="yes")["net_contracts"] == 0.0
     assert runtime.position(venue="kalshi", instrument_id="KXBTC15M-TEST", outcome_side="no")["net_contracts"] == 0.0
 

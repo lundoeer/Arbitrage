@@ -31,7 +31,7 @@
     }
   },
   "position_monitoring": {
-    "enabled": false,
+    "enabled": true,
     "require_bootstrap_before_buy": true,
     "polymarket_user_ws_enabled": true,
     "kalshi_market_positions_ws_enabled": true,
@@ -43,8 +43,8 @@
     "stale_error_seconds": 180
   },
   "execution": {
-    "best_ask_and_bids_at_max": 0.95,
-    "best_ask_and_bids_at_min": 0.05,
+    "best_ask_and_bids_at_max": 0.88,
+    "best_ask_and_bids_at_min": 0.12,
     "market_start_trade_time_seconds": 120,
     "market_end_trade_time_seconds": 120
   }

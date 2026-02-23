@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.engine_cli import build_parser
+from scripts.run.engine_cli import build_parser
 from scripts.common.engine_logger import EngineLogger
 from scripts.common.engine_setup import (
     build_buy_execution_clients,
