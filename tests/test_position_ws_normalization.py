@@ -1,7 +1,15 @@
 from __future__ import annotations
 
-from scripts.common.ws_collectors import KalshiMarketPositionsWsCollector, PolymarketUserWsCollector
-from scripts.common.ws_normalization import normalize_kalshi_market_positions_event, normalize_polymarket_user_event
+from scripts.common.ws_collectors import (
+    KalshiMarketPositionsWsCollector,
+    KalshiUserOrdersWsCollector,
+    PolymarketUserWsCollector,
+)
+from scripts.common.ws_normalization import (
+    normalize_kalshi_market_positions_event,
+    normalize_kalshi_user_orders_event,
+    normalize_polymarket_user_event,
+)
 from scripts.common.ws_transport import NullWriter
 
 
@@ -148,3 +156,52 @@ def test_position_collectors_subscription_payloads() -> None:
     assert params["channels"] == ["market_positions"]
     assert params["market_ticker"] == "KXBTC15M-TEST"
     assert params["market_tickers"] == ["KXBTC15M-TEST"]
+
+    kx_orders = KalshiUserOrdersWsCollector(
+        market_ticker="KXBTC15M-TEST",
+        headers={},
+        raw_writer=null_writer,
+        event_writer=null_writer,
+    )
+    kx_order_payloads = list(kx_orders.subscription_payloads())
+    assert len(kx_order_payloads) == 1
+    params_orders = kx_order_payloads[0]["params"]
+    assert params_orders["channels"] == ["user_orders"]
+    assert params_orders["market_ticker"] == "KXBTC15M-TEST"
+    assert params_orders["market_tickers"] == ["KXBTC15M-TEST"]
+
+
+def test_normalize_kalshi_user_orders_event() -> None:
+    message = {
+        "type": "user_orders",
+        "msg": {
+            "orders": [
+                {
+                    "order_id": "oid-1",
+                    "client_order_id": "cid-1",
+                    "ticker": "KXBTC15M-TEST",
+                    "side": "yes",
+                    "action": "buy",
+                    "status": "open",
+                    "initial_count_fp": "10.0",
+                    "fill_count_fp": "2.0",
+                    "remaining_count_fp": "8.0",
+                    "yes_price_dollars": "0.55",
+                }
+            ]
+        },
+    }
+    events = list(normalize_kalshi_user_orders_event(message, recv_ms=1_000, market_ticker="KXBTC15M-TEST"))
+    assert len(events) == 1
+    event = events[0]
+    assert event["kind"] == "kalshi_user_order"
+    assert event["order_id"] == "oid-1"
+    assert event["client_order_id"] == "cid-1"
+    assert event["market_ticker"] == "KXBTC15M-TEST"
+    assert event["outcome_side"] == "yes"
+    assert event["action"] == "buy"
+    assert event["status"] == "OPEN"
+    assert event["requested_size"] == 10.0
+    assert event["filled_size"] == 2.0
+    assert event["remaining_size"] == 8.0
+    assert event["limit_price"] == 0.55

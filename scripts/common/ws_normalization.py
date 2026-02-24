@@ -328,16 +328,24 @@ def normalize_polymarket_user_event(
 
     if event_type == "order":
         order_event_type = to_text(message.get("type"))
+        original_size = to_float(message.get("original_size"))
+        size_matched = to_float(message.get("size_matched"))
+        remaining_size = to_float(message.get("remaining_size"))
+        if remaining_size is None and original_size is not None and size_matched is not None:
+            remaining_size = max(0.0, float(original_size - size_matched))
         yield {
             "kind": "polymarket_user_order",
             "event_id": to_text(message.get("id")),
+            "order_id": to_text(message.get("id")) or to_text(message.get("order_id")),
+            "client_order_id": to_text(message.get("client_order_id")),
             "market": market,
             "asset_id": to_text(message.get("asset_id")),
             "outcome_side": to_outcome_side(message.get("outcome")),
             "order_side": to_side(message.get("side")),
             "price": to_float(message.get("price")),
-            "original_size": to_float(message.get("original_size")),
-            "size_matched": to_float(message.get("size_matched")),
+            "original_size": original_size,
+            "size_matched": size_matched,
+            "remaining_size": remaining_size,
             "status": str(order_event_type or "").upper() or None,
             "order_owner": to_text(message.get("order_owner")) or to_text(message.get("owner")),
             "associate_trades": (
@@ -420,3 +428,117 @@ def normalize_kalshi_market_positions_event(
         "source_timestamp_ms": source_ts_ms,
         "lag_ms": lag_ms,
     }
+
+
+def normalize_kalshi_user_orders_event(
+    message: Dict[str, Any],
+    recv_ms: int,
+    *,
+    market_ticker: Optional[str] = None,
+) -> Iterable[Dict[str, Any]]:
+    event_type = str(message.get("type") or message.get("event_type") or "").strip().lower()
+    data = message.get("msg") if isinstance(message.get("msg"), dict) else message.get("data")
+    if data is None:
+        data = message.get("msg")
+    if data is None:
+        data = message
+
+    source_ts_ms = to_epoch_ms(
+        (data.get("ts") if isinstance(data, dict) else None)
+        or (data.get("timestamp") if isinstance(data, dict) else None)
+        or (data.get("time") if isinstance(data, dict) else None)
+    )
+    lag_ms = recv_ms - source_ts_ms if source_ts_ms is not None else None
+
+    rows: List[Dict[str, Any]] = []
+    if isinstance(data, dict):
+        if isinstance(data.get("orders"), list):
+            rows = [item for item in data.get("orders") if isinstance(item, dict)]
+        elif isinstance(data.get("order"), dict):
+            rows = [data.get("order")]  # type: ignore[list-item]
+        elif event_type in {"order", "user_order", "user_orders", "order_update"}:
+            rows = [data]
+    elif isinstance(data, list):
+        rows = [item for item in data if isinstance(item, dict)]
+
+    if not rows:
+        yield {
+            "kind": "control_or_unknown",
+            "market_ticker": to_text(data.get("market_ticker")) if isinstance(data, dict) else market_ticker,
+            "source_event_type": event_type or "unknown",
+            "payload": data,
+            "source_timestamp_ms": source_ts_ms,
+            "lag_ms": lag_ms,
+        }
+        return
+
+    for item in rows:
+        ticker = to_text(item.get("ticker")) or to_text(item.get("market_ticker")) or to_text(market_ticker)
+        if market_ticker and ticker and str(ticker) != str(market_ticker):
+            continue
+
+        side_text = to_text(item.get("side"))
+        action = to_side(item.get("action"))
+        if action is None:
+            action = to_side(item.get("order_side"))
+        if action is None and side_text is not None and side_text.lower() in {"buy", "sell"}:
+            action = side_text.lower()
+
+        outcome_side = to_outcome_side(side_text)
+        status = to_text(item.get("status")) or to_text(item.get("state")) or to_text(item.get("order_status"))
+        status_upper = str(status or "").upper() if status else None
+
+        requested_size = (
+            to_float(item.get("initial_count_fp"))
+            if item.get("initial_count_fp") is not None
+            else to_float(item.get("initial_count"))
+        )
+        filled_size = (
+            to_float(item.get("fill_count_fp"))
+            if item.get("fill_count_fp") is not None
+            else to_float(item.get("fill_count"))
+        )
+        remaining_size = (
+            to_float(item.get("remaining_count_fp"))
+            if item.get("remaining_count_fp") is not None
+            else to_float(item.get("remaining_count"))
+        )
+        if remaining_size is None and requested_size is not None and filled_size is not None:
+            remaining_size = max(0.0, float(requested_size - filled_size))
+
+        limit_price = (
+            to_prob(item.get("yes_price_dollars"))
+            if outcome_side == "yes"
+            else to_prob(item.get("no_price_dollars"))
+        )
+        if limit_price is None:
+            limit_price = to_prob(item.get("price_dollars"))
+        if limit_price is None:
+            limit_price = to_prob(item.get("price"))
+
+        order_id = to_text(item.get("order_id")) or to_text(item.get("id"))
+        client_order_id = to_text(item.get("client_order_id"))
+        event_id = (
+            to_text(item.get("event_id"))
+            or to_text(item.get("id"))
+            or f"kx_user_order:{order_id or client_order_id or 'na'}:{source_ts_ms or recv_ms}"
+        )
+
+        yield {
+            "kind": "kalshi_user_order",
+            "event_id": event_id,
+            "market_ticker": ticker,
+            "order_id": order_id,
+            "client_order_id": client_order_id,
+            "outcome_side": outcome_side,
+            "action": action,
+            "status": status_upper,
+            "requested_size": requested_size,
+            "filled_size": filled_size,
+            "remaining_size": remaining_size,
+            "limit_price": limit_price,
+            "source_event_type": event_type or "user_orders",
+            "source_timestamp_ms": source_ts_ms,
+            "lag_ms": lag_ms,
+            "payload": item,
+        }

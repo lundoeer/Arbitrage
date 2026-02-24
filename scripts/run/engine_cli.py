@@ -126,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable Kalshi market_positions websocket ingestion for position monitoring (default: true).",
     )
     parser.add_argument(
+        "--kalshi-user-orders-ws-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable Kalshi user_orders websocket ingestion for order-state monitoring (default: true).",
+    )
+    parser.add_argument(
         "--position-polymarket-poll-seconds",
         type=float,
         default=None,
@@ -136,6 +142,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Kalshi positions poll interval seconds (default: 20.0).",
+    )
+    parser.add_argument(
+        "--position-polymarket-orders-poll-seconds",
+        type=float,
+        default=None,
+        help="Polymarket orders poll interval seconds (default: 10.0).",
+    )
+    parser.add_argument(
+        "--position-kalshi-orders-poll-seconds",
+        type=float,
+        default=None,
+        help="Kalshi orders poll interval seconds (default: 20.0).",
     )
     parser.add_argument(
         "--position-loop-sleep-seconds",

@@ -63,7 +63,7 @@ Decision loop (`engine_loop.py`):
 Persistence behavior:
 
 - default engine mode: no file output for raw/events
-- `--log-raw-events`: writes raw/events files and one summary JSON
+- `--log-raw-events`: writes raw/events files and one summary JSON (and, when position monitoring is active, REST position raw poll files)
 
 ## Raw Frame Schema
 
@@ -390,7 +390,7 @@ Memory mutation:
 Engine (`scripts/run/engine_loop.py`):
 
 - default: no raw/events are written
-- with `--log-raw-events`: raw/events and one summary are written
+- with `--log-raw-events`: raw/events and one summary are written (plus REST position raw poll files when position monitoring is active)
 
 Diagnostic samplers still produce additional derived files:
 
@@ -547,6 +547,8 @@ Engine with `--log-raw-events`:
 - `data/websocket_poly/events_engine__*.jsonl` (every normalized Polymarket event)
 - `data/websocket_kalshi/raw_engine__*.jsonl` (every Kalshi frame)
 - `data/websocket_kalshi/events_engine__*.jsonl` (every normalized Kalshi event)
+- `data/position_poll_raw_http_polymarket__*.jsonl` (per-poll raw Polymarket REST positions payload)
+- `data/position_poll_raw_http_kalshi__*.jsonl` (per-poll raw Kalshi REST positions payload/pages)
 - `data/arbitrage_engine_summary__*.json` (final write once)
 
 Current example files:

@@ -57,7 +57,7 @@ How this file is structured:
 #   --skip-discovery          Use cached pair (only if pair cache is fresh)
 #   --no-enable-buy-execution Disable trading
 #   --log-runtime-memory      1s snapshots of full book state
-#   --log-raw-events          Write raw WS messages to data/websocket_*/
+#   --log-raw-events          Write raw WS messages plus position REST raw polls
 #   --log-decisions           Write decision samples to data/decision_log__*.jsonl
 #   --log-edge-snapshots      Write edge snapshots to data/gross_edge_snapshot__*.jsonl
 #   --log-positions           Log position polling loop results

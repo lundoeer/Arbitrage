@@ -7,6 +7,7 @@ from scripts.common.kalshi_auth import resolve_kalshi_ws_headers
 from scripts.common.ws_normalization import (
     normalize_kalshi_event,
     normalize_kalshi_market_positions_event,
+    normalize_kalshi_user_orders_event,
     normalize_polymarket_event,
     normalize_polymarket_user_event,
 )
@@ -198,6 +199,55 @@ class KalshiMarketPositionsWsCollector(BaseWsCollector):
 
     def normalize_event(self, message: Dict[str, Any], recv_ms: int) -> Iterable[Dict[str, Any]]:
         yield from normalize_kalshi_market_positions_event(
+            message,
+            recv_ms,
+            market_ticker=self.market_ticker,
+        )
+
+
+class KalshiUserOrdersWsCollector(BaseWsCollector):
+    WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+
+    def __init__(
+        self,
+        *,
+        market_ticker: str,
+        headers: Optional[Dict[str, str]] = None,
+        headers_factory: Optional[Callable[[], Dict[str, str]]] = None,
+        raw_writer: CollectorWriter,
+        event_writer: CollectorWriter,
+        health_config: Optional[WsHealthConfig] = None,
+        on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        self.market_ticker = str(market_ticker or "").strip()
+        if not self.market_ticker:
+            raise RuntimeError("Kalshi user orders collector requires market_ticker")
+        if headers is None and headers_factory is None:
+            headers = resolve_kalshi_ws_headers()
+        super().__init__(
+            name="kalshi_user_orders_ws",
+            url=self.WS_URL,
+            raw_writer=raw_writer,
+            event_writer=event_writer,
+            headers=headers or {},
+            headers_factory=headers_factory,
+            health=health_config,
+            on_event=on_event,
+        )
+
+    def subscription_payloads(self) -> Iterable[Dict[str, Any]]:
+        yield {
+            "id": 1,
+            "cmd": "subscribe",
+            "params": {
+                "channels": ["user_orders"],
+                "market_ticker": self.market_ticker,
+                "market_tickers": [self.market_ticker],
+            },
+        }
+
+    def normalize_event(self, message: Dict[str, Any], recv_ms: int) -> Iterable[Dict[str, Any]]:
+        yield from normalize_kalshi_user_orders_event(
             message,
             recv_ms,
             market_ticker=self.market_ticker,

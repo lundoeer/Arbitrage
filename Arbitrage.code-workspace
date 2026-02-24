@@ -1,0 +1,16 @@
+{
+  "folders": [{ "path": "." }],
+  "settings": {
+    "python.defaultInterpreterPath": "C:\\Projects\\Arbitrage\\.venv\\Scripts\\python.exe",
+    "python.terminal.activateEnvironment": true,
+
+    "ruff.nativeServer": "on",
+    "ruff.lint.enable": true,
+    "ruff.importStrategy": "fromEnvironment",
+
+    "files.exclude": {
+      "**/__pycache__": true,
+    },
+    "python.analysis.extraPaths": ["."],
+  },
+}

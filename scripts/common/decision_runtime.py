@@ -142,11 +142,17 @@ def _build_execution_plan(
     no_quote = _as_dict(quote_legs.get(no_leg_name))
     yes_ask = _as_float_number(yes_quote.get("best_ask"))
     no_ask = _as_float_number(no_quote.get("best_ask"))
+    yes_ask_size = _as_float_number(yes_quote.get("best_ask_size"))
+    no_ask_size = _as_float_number(no_quote.get("best_ask_size"))
     reasons: List[str] = []
     if yes_ask is None or yes_ask <= 0.0:
         reasons.append(f"missing_or_invalid_best_ask:{yes_leg_name}")
     if no_ask is None or no_ask <= 0.0:
         reasons.append(f"missing_or_invalid_best_ask:{no_leg_name}")
+    if yes_ask_size is None or yes_ask_size <= 0.0:
+        reasons.append(f"missing_or_invalid_best_ask_size:{yes_leg_name}")
+    if no_ask_size is None or no_ask_size <= 0.0:
+        reasons.append(f"missing_or_invalid_best_ask_size:{no_leg_name}")
     total_ask = _as_float_number(candidate.get("total_ask"))
     if total_ask is None and yes_ask is not None and no_ask is not None:
         total_ask = float(yes_ask + no_ask)
@@ -155,6 +161,8 @@ def _build_execution_plan(
     if reasons:
         return None, reasons
     assert total_ask is not None
+    assert yes_ask_size is not None
+    assert no_ask_size is not None
     total_ask_value = float(total_ask)
 
     max_spend = float(decision_config.buy.max_spend_per_market_usd)
@@ -163,15 +171,45 @@ def _build_execution_plan(
     max_size_cap_per_leg = float(decision_config.buy.max_size_cap_per_leg)
     if max_size_cap_per_leg <= 0.0:
         return None, ["invalid_max_size_cap_per_leg"]
+    min_size_per_leg_contracts = float(decision_config.buy.min_size_per_leg_contracts)
+    if min_size_per_leg_contracts < 0.0:
+        return None, ["invalid_min_size_per_leg_contracts"]
+    min_notional_per_leg_usd = float(decision_config.buy.min_notional_per_leg_usd)
+    if min_notional_per_leg_usd < 0.0:
+        return None, ["invalid_min_notional_per_leg_usd"]
+    best_ask_size_safety_factor = float(decision_config.buy.best_ask_size_safety_factor)
+    if best_ask_size_safety_factor <= 0.0 or best_ask_size_safety_factor > 1.0:
+        return None, ["invalid_best_ask_size_safety_factor"]
 
-    # Budget-based size with configurable hard cap per leg.
-    raw_size = min(float(max_size_cap_per_leg), float(max_spend / total_ask_value))
+    # Buy size is capped by spend, explicit size cap, and top-of-book liquidity
+    # after applying a safety factor to visible ask size.
+    top_ask_size_min = float(min(float(yes_ask_size), float(no_ask_size)))
+    cap_by_spend = float(max_spend / total_ask_value)
+    cap_by_config_size = float(max_size_cap_per_leg)
+    cap_by_top_ask_after_safety_factor = float(top_ask_size_min * best_ask_size_safety_factor)
+    if cap_by_top_ask_after_safety_factor <= 0.0:
+        return None, ["insufficient_top_of_book_after_safety_factor"]
+    raw_size = min(cap_by_spend, cap_by_config_size, cap_by_top_ask_after_safety_factor)
     if raw_size <= 0.0:
         return None, ["computed_non_positive_size"]
     size_whole = int(math.floor(float(raw_size)))
     if size_whole <= 0:
+        if cap_by_top_ask_after_safety_factor < 1.0:
+            return None, ["insufficient_top_of_book_after_safety_factor"]
         return None, ["computed_size_below_one_contract"]
     size = float(size_whole)
+    if min_size_per_leg_contracts > 0.0 and size < min_size_per_leg_contracts:
+        return None, ["computed_size_below_min_size_per_leg_contracts"]
+    yes_leg_notional_usd = float(yes_ask * size)
+    no_leg_notional_usd = float(no_ask * size)
+    notional_reasons: List[str] = []
+    if min_notional_per_leg_usd > 0.0:
+        if yes_leg_notional_usd < min_notional_per_leg_usd:
+            notional_reasons.append(f"computed_notional_below_min_notional_per_leg_usd:{yes_leg_name}")
+        if no_leg_notional_usd < min_notional_per_leg_usd:
+            notional_reasons.append(f"computed_notional_below_min_notional_per_leg_usd:{no_leg_name}")
+    if notional_reasons:
+        return None, notional_reasons
 
     yes_leg = _execution_leg_from_name(
         leg_name=yes_leg_name,
@@ -229,11 +267,31 @@ def _build_execution_plan(
         "max_quote_age_ms": max_quote_age_ms,
         "policy": {
             "planner_version": "decision_runtime_v1",
-            "sizing_mode": "budget_with_configured_cap_per_leg",
+            "sizing_mode": "top_of_book_budget_caps_with_min_thresholds",
             "max_spend_per_market_usd": max_spend,
             "max_size_cap_per_leg": max_size_cap_per_leg,
+            "best_ask_size_safety_factor": best_ask_size_safety_factor,
+            "min_size_per_leg_contracts": min_size_per_leg_contracts,
+            "min_notional_per_leg_usd": min_notional_per_leg_usd,
+            "inputs": {
+                "yes_best_ask": float(yes_ask),
+                "no_best_ask": float(no_ask),
+                "yes_best_ask_size": float(yes_ask_size),
+                "no_best_ask_size": float(no_ask_size),
+                "top_ask_size_min": float(top_ask_size_min),
+            },
+            "computed_caps": {
+                "cap_by_spend": float(cap_by_spend),
+                "cap_by_config_size": float(cap_by_config_size),
+                "cap_by_top_ask_after_safety_factor": float(cap_by_top_ask_after_safety_factor),
+            },
             "size_rounding": "floor_to_whole_contract",
             "raw_size_before_rounding": float(raw_size),
+            "final_size": float(size),
+            "final_leg_notional_usd": {
+                "yes_leg_notional_usd": float(yes_leg_notional_usd),
+                "no_leg_notional_usd": float(no_leg_notional_usd),
+            },
         },
     }
     return plan, []

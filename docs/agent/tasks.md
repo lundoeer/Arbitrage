@@ -1,6 +1,6 @@
 # tasks.md
 
-Last updated: 2026-02-21
+Last updated: 2026-02-24
 
 Purpose: Maintain the active execution queue with clear priorities, ownership, and status.
 
@@ -29,21 +29,25 @@ How this file is structured:
 - [x] #19 — Refactor `PositionRuntime` to use `@dataclass` for state management
 - [x] #20 — Clean up `position_polling.py` utility redundancies
 - [x] #21 — Polish `docs/position_monitoring.md` documentation
+- [x] #29 - Create a script that looks at the currently avialable data\account_portfolio_snapshot_logs and shows all changes
+- [x] #28 -Implement max exposture per market. This is each market in the active market pair. -> if over all buying blocked on that market.
+- [x] #25_a order-state ingestion/status reconciliation.
+- [x] #31: Corrections: I want to measure exposure based on market_exposure from kalshi and initial value from polymarket. If one market is above max exposure then buying should be closed.
+- [x] #30 - Parallelized buy leg submits inside `execute_cross_venue_buy` with per-leg timeout + timing fields + tests.
+- [x] #22 - Implemented buy sizing with top-of-book liquidity cap, safety factor, and configurable minimum contracts/notional thresholds.
 
 ## Now
 
-awaiting user decision
+- None
 
 ## Next
 
-- [ ] #29 - Create a script that looks at the currently avialable data\account_portfolio_snapshot_logs and shows all changes in the time, kalshi and polymarket balances and the total of the two with only these four fields pr. line an only new lines when there are changes. also kalshi and polymarket balances need to be converted to dollars currently kalshi is in cents and polymarket is in milicents i think.
-- [ ] #22 - Implement sizing based on mainly on current best_size but maybe also book
-- [ ] #23 -Implement minimum sizing so both sides of the trade is above a configurable threshold.
-- [ ] #24 -Implement selling positions based on bids - this should also check size
-- [ ] #25 -Implement order monitoring and cancellations - this is hopefully not super relevant with the current order types, but i need to know if i have any orders in place.
-- [ ] #26 -Implement hedging based on positions and a check for unfilled orders. Integrated with drift_tolerance
-- [ ] #27 -Implement states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed. Maybe the current FSM is already handeling this otherwise consider if this is new or a change to FSM where does this belong? Maybe it is logic to go from Awaiting_result to cooldown currently it just auto moves as far as i can see.
-- [ ] #28 -Implement max exposture per market -> if over all buying blocked on that market.
+- [ ] #27_a -Design states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed. Maybe the current FSM is already handeling this otherwise consider if this is new or a change to FSM where does this belong? Maybe it is logic to go from Awaiting_result to cooldown currently it just auto moves as far as i can see.
+- [ ] #27_b -Implement states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed.
+- [ ] #24 -Implement selling positions based on bids - this should also check size but have its own thresholds and it is checking bid sizes not ask like buying
+- [ ] #26 -Implement hedging based on positions and a check for unfilled orders. Hedging is one-leg selling to avoid unbalanced positions
+- [ ] #33 - Implement market surveillance - target price on market start and through chainlink - and regular current price surveillance
+      -[] #32 remove fallbacks from tests so the fail when they are meant to
 
 ## Later
 
@@ -54,3 +58,7 @@ awaiting user decision
 ## Blocked
 
 - None
+
+## Implementation uncertain - under consideration
+
+- [ ] #25_b cancellation policy + cancellation executor

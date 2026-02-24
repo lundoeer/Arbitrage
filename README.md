@@ -86,6 +86,8 @@ Engine outputs (in `data/`):
 - `decision_log__*.jsonl` — per-tick decision samples
 - `gross_edge_snapshot__*.jsonl` — edge snapshot log
 - `position_monitoring_log__*.jsonl` — periodic position snapshots
+- `position_poll_raw_http_polymarket__*.jsonl` — raw Polymarket REST position poll payloads (`--log-raw-events`)
+- `position_poll_raw_http_kalshi__*.jsonl` — raw Kalshi REST position poll payloads (`--log-raw-events`)
 - `websocket_share_price_runtime__*.jsonl` — 1s book state snapshots
 - `websocket_kalshi/raw_engine__*.jsonl` — raw Kalshi WS frames
 - `websocket_poly/raw_engine__*.jsonl` — raw Polymarket WS frames
@@ -118,9 +120,9 @@ POLYMARKET_FUNDER=
 
 ## Documentation
 
-- `docs/ClaudeOpusReview.md` — Full architecture review
-- `docs/ClaudeOpusSuggestions.md` — Prioritized improvement plan
 - `docs/buying.md` — Buy execution design (FSM, execution flow)
 - `docs/websocket.md` — WebSocket implementation details
 - `docs/Improve_lag.md` — Health metric accuracy improvements
+- `docs\position_monitoring.md`
+- `docs\run_scripts_overview.md`
 - `docs/agent/` — Agent-facing project context documents

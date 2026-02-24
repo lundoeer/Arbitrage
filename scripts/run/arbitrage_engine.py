@@ -53,8 +53,10 @@ class ArbitrageEngine:
         account_snapshot_logging_enabled: bool,
         buy_execution_cooldown_ms: int,
         buy_execution_max_attempts: int,
+        buy_execution_parallel_leg_timeout_ms: int,
         polymarket_user_ws_enabled: bool,
         kalshi_market_positions_ws_enabled: bool,
+        kalshi_user_orders_ws_enabled: bool,
         kalshi_channels: List[str],
         args: Any,
     ) -> None:
@@ -70,8 +72,10 @@ class ArbitrageEngine:
         self.account_snapshot_logging_enabled = account_snapshot_logging_enabled
         self.buy_execution_cooldown_ms = buy_execution_cooldown_ms
         self.buy_execution_max_attempts = buy_execution_max_attempts
+        self.buy_execution_parallel_leg_timeout_ms = buy_execution_parallel_leg_timeout_ms
         self.polymarket_user_ws_enabled = polymarket_user_ws_enabled
         self.kalshi_market_positions_ws_enabled = kalshi_market_positions_ws_enabled
+        self.kalshi_user_orders_ws_enabled = kalshi_user_orders_ws_enabled
         self.kalshi_channels = kalshi_channels
         self.args = args
 
@@ -134,8 +138,13 @@ class ArbitrageEngine:
             "position_poll_polymarket_failure": 0,
             "position_poll_kalshi_success": 0,
             "position_poll_kalshi_failure": 0,
+            "position_poll_polymarket_orders_success": 0,
+            "position_poll_polymarket_orders_failure": 0,
+            "position_poll_kalshi_orders_success": 0,
+            "position_poll_kalshi_orders_failure": 0,
             "position_ws_polymarket_user_events": 0,
             "position_ws_kalshi_market_position_events": 0,
+            "position_ws_kalshi_user_order_events": 0,
             "position_health_state_changes": 0,
             "position_health_allowed_samples": 0,
             "position_health_blocked_samples": 0,
@@ -197,6 +206,7 @@ class ArbitrageEngine:
         segment_position_event_state: Dict[str, int] = {
             "polymarket_user_events": 0,
             "kalshi_market_position_events": 0,
+            "kalshi_user_order_events": 0,
         }
         
         pm_raw_writer = NullWriter()
@@ -207,6 +217,8 @@ class ArbitrageEngine:
         pm_user_event_writer = NullWriter()
         kx_market_positions_raw_writer = NullWriter()
         kx_market_positions_event_writer = NullWriter()
+        kx_user_orders_raw_writer = NullWriter()
+        kx_user_orders_event_writer = NullWriter()
         
         ws_writers = []
         if bool(getattr(self.args, "log_raw_events", False)):
@@ -235,6 +247,10 @@ class ArbitrageEngine:
                 kx_market_positions_raw_writer = JsonlWriter(kalshi_dir / f"raw_market_positions__{self.segment_index}_{run_id}.jsonl")
                 kx_market_positions_event_writer = JsonlWriter(kalshi_dir / f"events_market_positions__{self.segment_index}_{run_id}.jsonl")
                 ws_writers.extend([kx_market_positions_raw_writer, kx_market_positions_event_writer])
+            if self.kalshi_user_orders_ws_enabled:
+                kx_user_orders_raw_writer = JsonlWriter(kalshi_dir / f"raw_user_orders__{self.segment_index}_{run_id}.jsonl")
+                kx_user_orders_event_writer = JsonlWriter(kalshi_dir / f"events_user_orders__{self.segment_index}_{run_id}.jsonl")
+                ws_writers.extend([kx_user_orders_raw_writer, kx_user_orders_event_writer])
 
         def _on_pm_user_event(event: Dict[str, Any]) -> None:
             if segment_position_runtime is None:
@@ -243,6 +259,11 @@ class ArbitrageEngine:
             if kind in {"polymarket_user_trade", "polymarket_user_order"}:
                 segment_position_event_state["polymarket_user_events"] = (
                     int(segment_position_event_state.get("polymarket_user_events", 0)) + 1
+                )
+            if kind == "polymarket_user_order":
+                segment_position_runtime.apply_polymarket_user_order_event(
+                    event_payload=event,
+                    now_epoch_ms=now_ms(),
                 )
             if kind == "polymarket_user_trade" and bool(event.get("is_confirmed")):
                 size = _as_float(event.get("size"))
@@ -302,12 +323,34 @@ class ArbitrageEngine:
                 payload={"event": event, "position_health": segment_position_runtime.refresh_health(now_epoch_ms=now_ms())}
             )
 
+        def _on_kx_user_order_event(event: Dict[str, Any]) -> None:
+            if segment_position_runtime is None:
+                return
+            kind = str(event.get("kind") or "")
+            if kind != "kalshi_user_order":
+                return
+            segment_position_event_state["kalshi_user_order_events"] = (
+                int(segment_position_event_state.get("kalshi_user_order_events", 0)) + 1
+            )
+            segment_position_runtime.apply_kalshi_user_order_event(
+                event_payload=event,
+                now_epoch_ms=now_ms(),
+            )
+            self.logger.write_position_event(
+                recv_ms=now_ms(),
+                sub_kind="kalshi_user_order",
+                payload={"event": event, "position_health": segment_position_runtime.refresh_health(now_epoch_ms=now_ms())}
+            )
+
         (
             pm_poll_client,
             pm_account_poll_client,
             kx_poll_client,
+            pm_orders_poll_client,
+            kx_orders_poll_client,
             segment_polymarket_user_collector,
             segment_kalshi_market_positions_collector,
+            segment_kalshi_user_orders_collector,
             segment_position_setup_errors,
         ) = build_position_components(
             enable_position_monitoring=self.position_monitoring_requested,
@@ -318,13 +361,17 @@ class ArbitrageEngine:
             kx_ticker=kx_ticker,
             polymarket_user_ws_enabled=self.polymarket_user_ws_enabled,
             kalshi_market_positions_ws_enabled=self.kalshi_market_positions_ws_enabled,
+            kalshi_user_orders_ws_enabled=self.kalshi_user_orders_ws_enabled,
             health_config=self.health_config,
             on_pm_user_event=_on_pm_user_event,
             on_kx_market_position_event=_on_kx_market_position_event,
+            on_kx_user_order_event=_on_kx_user_order_event,
             pm_user_raw_writer=pm_user_raw_writer,
             pm_user_event_writer=pm_user_event_writer,
             kx_market_positions_raw_writer=kx_market_positions_raw_writer,
             kx_market_positions_event_writer=kx_market_positions_event_writer,
+            kx_user_orders_raw_writer=kx_user_orders_raw_writer,
+            kx_user_orders_event_writer=kx_user_orders_event_writer,
         )
 
         segment_position_monitoring_enabled = False
@@ -336,6 +383,10 @@ class ArbitrageEngine:
                 config=PositionRuntimeConfig(
                     require_bootstrap_before_buy=bool(self.position_monitoring_config.require_bootstrap_before_buy),
                     drift_tolerance_contracts=float(self.position_monitoring_config.drift_tolerance_contracts),
+                    max_exposure_per_market_usd=float(self.position_monitoring_config.max_exposure_per_market_usd),
+                    include_pending_orders_in_exposure=bool(
+                        self.position_monitoring_config.include_pending_orders_in_exposure
+                    ),
                     stale_warning_seconds=int(self.position_monitoring_config.stale_warning_seconds),
                     stale_error_seconds=int(self.position_monitoring_config.stale_error_seconds),
                 ),
@@ -346,7 +397,10 @@ class ArbitrageEngine:
                 runtime=segment_position_runtime,
                 polymarket_client=pm_poll_client,
                 kalshi_client=kx_poll_client,
+                polymarket_orders_client=pm_orders_poll_client,
+                kalshi_orders_client=kx_orders_poll_client,
                 config=self.position_reconcile_config,
+                log_raw_http=bool(getattr(self.args, "log_raw_events", False)),
             )
             segment_position_monitoring_enabled = bool(segment_position_reconcile_loop is not None)
             self.position_monitoring_enabled_last = bool(segment_position_monitoring_enabled)
@@ -435,6 +489,7 @@ class ArbitrageEngine:
                     kalshi_collector=kalshi_collector,
                     polymarket_collector=polymarket_collector,
                     kalshi_market_positions_collector=segment_kalshi_market_positions_collector,
+                    kalshi_user_orders_collector=segment_kalshi_user_orders_collector,
                     polymarket_user_collector=segment_polymarket_user_collector,
                     runtime=runtime,
                     position_runtime=segment_position_runtime,
@@ -452,6 +507,7 @@ class ArbitrageEngine:
                     buy_idempotency_state=self.buy_idempotency_state,
                     buy_execution_cooldown_ms=self.buy_execution_cooldown_ms,
                     buy_execution_max_attempts=self.buy_execution_max_attempts,
+                    buy_execution_parallel_leg_timeout_ms=self.buy_execution_parallel_leg_timeout_ms,
                     buy_execution_attempt_state=self.buy_execution_attempt_state,
                 )
             )

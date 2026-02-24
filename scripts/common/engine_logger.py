@@ -17,6 +17,8 @@ class EngineLogger:
         self.buy_decision_writer: Optional[JsonlWriter] = None
         self.buy_execution_writer: Optional[JsonlWriter] = None
         self.positions_writer: Optional[JsonlWriter] = None
+        self.position_poll_raw_polymarket_writer: Optional[JsonlWriter] = None
+        self.position_poll_raw_kalshi_writer: Optional[JsonlWriter] = None
         self.account_snapshot_writer: Optional[JsonlWriter] = None
         self.edge_snapshot_writer: Optional[JsonlWriter] = None
         self.runtime_memory_writer: Optional[JsonlWriter] = None
@@ -28,6 +30,7 @@ class EngineLogger:
         log_buy_decisions: bool,
         log_buy_execution: bool,
         log_positions: bool,
+        log_raw_events: bool,
         log_account_snapshots: bool,
         log_edge_snapshots: bool,
         log_runtime_memory: bool,
@@ -57,6 +60,17 @@ class EngineLogger:
             self.positions_writer = JsonlWriter(path)
             self.writers.append(self.positions_writer)
             self.files["position_monitoring_log"] = str(path)
+
+        if log_raw_events:
+            pm_path = data_dir / f"position_poll_raw_http_polymarket__{self.run_id}.jsonl"
+            self.position_poll_raw_polymarket_writer = JsonlWriter(pm_path)
+            self.writers.append(self.position_poll_raw_polymarket_writer)
+            self.files["position_poll_raw_http_polymarket"] = str(pm_path)
+
+            kx_path = data_dir / f"position_poll_raw_http_kalshi__{self.run_id}.jsonl"
+            self.position_poll_raw_kalshi_writer = JsonlWriter(kx_path)
+            self.writers.append(self.position_poll_raw_kalshi_writer)
+            self.files["position_poll_raw_http_kalshi"] = str(kx_path)
 
         if log_account_snapshots:
             path = data_dir / f"account_portfolio_snapshot_log__{self.run_id}.jsonl"
@@ -109,6 +123,23 @@ class EngineLogger:
                 "ts": utc_now_iso(),
                 "recv_ms": recv_ms,
                 "kind": f"position_{sub_kind}",
+                **payload,
+            })
+
+    def write_position_poll_raw(self, *, recv_ms: int, venue: str, payload: Dict[str, Any]) -> None:
+        venue_norm = str(venue or "").strip().lower()
+        if venue_norm == "polymarket":
+            writer = self.position_poll_raw_polymarket_writer
+        elif venue_norm == "kalshi":
+            writer = self.position_poll_raw_kalshi_writer
+        else:
+            return
+        if writer:
+            writer.write({
+                "ts": utc_now_iso(),
+                "recv_ms": recv_ms,
+                "kind": f"position_poll_raw_http_{venue_norm}",
+                "venue": venue_norm,
                 **payload,
             })
 

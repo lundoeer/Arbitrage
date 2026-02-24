@@ -96,6 +96,7 @@ def main() -> None:
         if args.max_buy_execution_attempts is not None
         else max(0, int(buy_execution_config.max_attempts_per_run))
     )
+    buy_execution_parallel_leg_timeout_ms = max(100, int(buy_execution_config.parallel_leg_timeout_ms))
 
     position_monitoring_requested = (
         bool(args.enable_position_monitoring)
@@ -112,6 +113,11 @@ def main() -> None:
         if args.kalshi_market_positions_ws_enabled is not None
         else bool(position_monitoring_config.kalshi_market_positions_ws_enabled)
     )
+    kalshi_user_orders_ws_enabled = (
+        bool(args.kalshi_user_orders_ws_enabled)
+        if args.kalshi_user_orders_ws_enabled is not None
+        else bool(position_monitoring_config.kalshi_user_orders_ws_enabled)
+    )
     position_polymarket_poll_seconds = (
         max(0.2, float(args.position_polymarket_poll_seconds))
         if args.position_polymarket_poll_seconds is not None
@@ -122,6 +128,16 @@ def main() -> None:
         if args.position_kalshi_poll_seconds is not None
         else max(0.2, float(position_monitoring_config.kalshi_poll_seconds))
     )
+    position_polymarket_orders_poll_seconds = (
+        max(0.2, float(args.position_polymarket_orders_poll_seconds))
+        if args.position_polymarket_orders_poll_seconds is not None
+        else max(0.2, float(position_monitoring_config.polymarket_orders_poll_seconds))
+    )
+    position_kalshi_orders_poll_seconds = (
+        max(0.2, float(args.position_kalshi_orders_poll_seconds))
+        if args.position_kalshi_orders_poll_seconds is not None
+        else max(0.2, float(position_monitoring_config.kalshi_orders_poll_seconds))
+    )
     position_loop_sleep_seconds = (
         max(0.05, float(args.position_loop_sleep_seconds))
         if args.position_loop_sleep_seconds is not None
@@ -130,6 +146,8 @@ def main() -> None:
     position_reconcile_config = PositionReconcileLoopConfig(
         polymarket_poll_seconds=position_polymarket_poll_seconds,
         kalshi_poll_seconds=position_kalshi_poll_seconds,
+        polymarket_orders_poll_seconds=position_polymarket_orders_poll_seconds,
+        kalshi_orders_poll_seconds=position_kalshi_orders_poll_seconds,
         loop_sleep_seconds=position_loop_sleep_seconds,
     )
 
@@ -149,6 +167,7 @@ def main() -> None:
         log_buy_decisions=bool(args.log_buy_decisions),
         log_buy_execution=bool(args.log_buy_execution),
         log_positions=bool(args.log_positions),
+        log_raw_events=bool(args.log_raw_events),
         log_account_snapshots=bool(args.log_account_snapshots),
         log_edge_snapshots=bool(args.log_edge_snapshots),
         log_runtime_memory=bool(args.log_runtime_memory),
@@ -169,8 +188,10 @@ def main() -> None:
         account_snapshot_logging_enabled=account_snapshot_logging_enabled,
         buy_execution_cooldown_ms=buy_execution_cooldown_ms,
         buy_execution_max_attempts=buy_execution_max_attempts,
+        buy_execution_parallel_leg_timeout_ms=buy_execution_parallel_leg_timeout_ms,
         polymarket_user_ws_enabled=polymarket_user_ws_enabled,
         kalshi_market_positions_ws_enabled=kalshi_market_positions_ws_enabled,
+        kalshi_user_orders_ws_enabled=kalshi_user_orders_ws_enabled,
         kalshi_channels=kalshi_channels,
         args=args,
     )

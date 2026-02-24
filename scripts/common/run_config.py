@@ -68,6 +68,9 @@ class BuyDecisionConfig:
     min_gross_edge_threshold: float = 0.04
     max_spend_per_market_usd: float = 10.0
     max_size_cap_per_leg: float = 20.0
+    min_size_per_leg_contracts: float = 0.0
+    min_notional_per_leg_usd: float = 0.0
+    best_ask_size_safety_factor: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -99,6 +102,7 @@ class BuyExecutionRuntimeConfig:
     enabled: bool = False
     cooldown_ms: int = 0
     max_attempts_per_run: int = 1
+    parallel_leg_timeout_ms: int = 4000
     api_retry: BuyExecutionApiRetryConfig = field(default_factory=BuyExecutionApiRetryConfig)
 
 
@@ -108,10 +112,15 @@ class PositionMonitoringRuntimeConfig:
     require_bootstrap_before_buy: bool = True
     polymarket_user_ws_enabled: bool = True
     kalshi_market_positions_ws_enabled: bool = True
+    kalshi_user_orders_ws_enabled: bool = True
     polymarket_poll_seconds: float = 10.0
     kalshi_poll_seconds: float = 20.0
+    polymarket_orders_poll_seconds: float = 10.0
+    kalshi_orders_poll_seconds: float = 20.0
     loop_sleep_seconds: float = 0.2
     drift_tolerance_contracts: float = 0.0
+    max_exposure_per_market_usd: float = 0.0
+    include_pending_orders_in_exposure: bool = True
     stale_warning_seconds: int = 60
     stale_error_seconds: int = 180
 
@@ -190,6 +199,22 @@ def load_decision_config_from_run_config(*, config_path: Path) -> DecisionConfig
                 default=20.0,
                 min_value=0.0,
             ),
+            min_size_per_leg_contracts=_to_float(
+                buy.get("min_size_per_leg_contracts"),
+                default=0.0,
+                min_value=0.0,
+            ),
+            min_notional_per_leg_usd=_to_float(
+                buy.get("min_notional_per_leg_usd"),
+                default=0.0,
+                min_value=0.0,
+            ),
+            best_ask_size_safety_factor=_to_float_bounded(
+                buy.get("best_ask_size_safety_factor"),
+                default=0.5,
+                min_value=0.0,
+                max_value=1.0,
+            ),
         ),
         execution=ExecutionDecisionConfig(
             best_ask_and_bids_at_max=max_price,
@@ -219,6 +244,9 @@ def decision_config_to_dict(config: DecisionConfig) -> Dict[str, Any]:
             "min_gross_edge_threshold": float(config.buy.min_gross_edge_threshold),
             "max_spend_per_market_usd": float(config.buy.max_spend_per_market_usd),
             "max_size_cap_per_leg": float(config.buy.max_size_cap_per_leg),
+            "min_size_per_leg_contracts": float(config.buy.min_size_per_leg_contracts),
+            "min_notional_per_leg_usd": float(config.buy.min_notional_per_leg_usd),
+            "best_ask_size_safety_factor": float(config.buy.best_ask_size_safety_factor),
         },
         "execution": {
             "best_ask_and_bids_at_max": float(config.execution.best_ask_and_bids_at_max),
@@ -241,6 +269,11 @@ def load_buy_execution_runtime_config_from_run_config(*, config_path: Path) -> B
             buy_execution.get("max_attempts_per_run"),
             default=1,
             min_value=0,
+        ),
+        parallel_leg_timeout_ms=_to_int(
+            buy_execution.get("parallel_leg_timeout_ms"),
+            default=4000,
+            min_value=100,
         ),
         api_retry=BuyExecutionApiRetryConfig(
             enabled=_to_bool(api_retry.get("enabled"), default=True),
@@ -266,6 +299,7 @@ def buy_execution_runtime_config_to_dict(config: BuyExecutionRuntimeConfig) -> D
         "enabled": bool(config.enabled),
         "cooldown_ms": int(config.cooldown_ms),
         "max_attempts_per_run": int(config.max_attempts_per_run),
+        "parallel_leg_timeout_ms": int(config.parallel_leg_timeout_ms),
         "api_retry": {
             "enabled": bool(config.api_retry.enabled),
             "max_attempts": int(config.api_retry.max_attempts),
@@ -284,6 +318,7 @@ def load_position_monitoring_runtime_config_from_run_config(*, config_path: Path
         require_bootstrap_before_buy=_to_bool(monitor.get("require_bootstrap_before_buy"), default=True),
         polymarket_user_ws_enabled=_to_bool(monitor.get("polymarket_user_ws_enabled"), default=True),
         kalshi_market_positions_ws_enabled=_to_bool(monitor.get("kalshi_market_positions_ws_enabled"), default=True),
+        kalshi_user_orders_ws_enabled=_to_bool(monitor.get("kalshi_user_orders_ws_enabled"), default=True),
         polymarket_poll_seconds=_to_float(
             monitor.get("polymarket_poll_seconds"),
             default=10.0,
@@ -291,6 +326,16 @@ def load_position_monitoring_runtime_config_from_run_config(*, config_path: Path
         ),
         kalshi_poll_seconds=_to_float(
             monitor.get("kalshi_poll_seconds"),
+            default=20.0,
+            min_value=0.2,
+        ),
+        polymarket_orders_poll_seconds=_to_float(
+            monitor.get("polymarket_orders_poll_seconds"),
+            default=10.0,
+            min_value=0.2,
+        ),
+        kalshi_orders_poll_seconds=_to_float(
+            monitor.get("kalshi_orders_poll_seconds"),
             default=20.0,
             min_value=0.2,
         ),
@@ -303,6 +348,15 @@ def load_position_monitoring_runtime_config_from_run_config(*, config_path: Path
             monitor.get("drift_tolerance_contracts"),
             default=0.0,
             min_value=0.0,
+        ),
+        max_exposure_per_market_usd=_to_float(
+            monitor.get("max_exposure_per_market_usd"),
+            default=0.0,
+            min_value=0.0,
+        ),
+        include_pending_orders_in_exposure=_to_bool(
+            monitor.get("include_pending_orders_in_exposure"),
+            default=True,
         ),
         stale_warning_seconds=_to_int(
             monitor.get("stale_warning_seconds"),
@@ -323,10 +377,15 @@ def position_monitoring_runtime_config_to_dict(config: PositionMonitoringRuntime
         "require_bootstrap_before_buy": bool(config.require_bootstrap_before_buy),
         "polymarket_user_ws_enabled": bool(config.polymarket_user_ws_enabled),
         "kalshi_market_positions_ws_enabled": bool(config.kalshi_market_positions_ws_enabled),
+        "kalshi_user_orders_ws_enabled": bool(config.kalshi_user_orders_ws_enabled),
         "polymarket_poll_seconds": float(config.polymarket_poll_seconds),
         "kalshi_poll_seconds": float(config.kalshi_poll_seconds),
+        "polymarket_orders_poll_seconds": float(config.polymarket_orders_poll_seconds),
+        "kalshi_orders_poll_seconds": float(config.kalshi_orders_poll_seconds),
         "loop_sleep_seconds": float(config.loop_sleep_seconds),
         "drift_tolerance_contracts": float(config.drift_tolerance_contracts),
+        "max_exposure_per_market_usd": float(config.max_exposure_per_market_usd),
+        "include_pending_orders_in_exposure": bool(config.include_pending_orders_in_exposure),
         "stale_warning_seconds": int(config.stale_warning_seconds),
         "stale_error_seconds": int(config.stale_error_seconds),
     }

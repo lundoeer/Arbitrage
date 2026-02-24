@@ -195,3 +195,352 @@ def test_hard_stale_blocks_buy_and_recovers_after_fresh_reconcile() -> None:
     recovered = runtime.snapshot(now_epoch_ms=12_300)["health"]
     assert recovered["hard_stale"] is False
     assert recovered["buy_execution_allowed"] is True
+
+
+def test_max_exposure_blocks_buy_when_filled_position_exceeds_limit() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=5.0,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+
+    applied = runtime.apply_polymarket_confirmed_fill(
+        event_id="pm-trade-exposure-1",
+        instrument_id="pm_yes_token",
+        outcome_side="yes",
+        filled_contracts=10.0,
+        fill_price=0.6,
+        now_epoch_ms=1_100,
+    )
+    assert applied is True
+    health = runtime.snapshot(now_epoch_ms=1_100)["health"]
+    pm_exposure = health["exposure_by_market"]["polymarket"]
+    kx_exposure = health["exposure_by_market"]["kalshi"]
+    assert pm_exposure["gross_position_exposure_usd"] == 6.0
+    assert pm_exposure["gross_open_order_exposure_usd"] == 0.0
+    assert pm_exposure["gross_total_exposure_usd"] == 6.0
+    assert pm_exposure["exposure_limit_exceeded"] is True
+    assert pm_exposure["buy_blocked"] is True
+    assert kx_exposure["gross_total_exposure_usd"] == 0.0
+    assert kx_exposure["buy_blocked"] is False
+    assert health["buy_execution_allowed"] is True
+
+
+def test_max_exposure_uses_api_reported_position_exposure_when_present() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=5.0,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+    runtime.reconcile_positions_snapshot(
+        venue="polymarket",
+        positions=[
+            {
+                "instrument_id": "pm_yes_token",
+                "outcome_side": "yes",
+                "net_contracts": 20.0,
+                "position_exposure_usd": 4.0,
+            },
+            {"instrument_id": "pm_no_token", "outcome_side": "no", "net_contracts": 0.0},
+        ],
+        snapshot_id="poll-pm-exposure-1",
+        now_epoch_ms=1_100,
+    )
+    health = runtime.snapshot(now_epoch_ms=1_100)["health"]
+    pm_exposure = health["exposure_by_market"]["polymarket"]
+    assert pm_exposure["gross_position_exposure_usd"] == 4.0
+    assert pm_exposure["exposure_limit_exceeded"] is False
+    assert pm_exposure["buy_blocked"] is False
+
+
+def test_max_exposure_counts_open_orders_at_limit_price() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=5.0,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+    payload = {
+        "signal_id": "sig-open-order-exposure-1",
+        "status": "submitted",
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "no",
+                "instrument_id": "pm_no_token",
+                "client_order_id": "cid-open-1",
+                "request_payload": {
+                    "action": "buy",
+                    "size": 10.0,
+                    "limit_price": 0.6,
+                },
+                "response_payload": {
+                    "response": {
+                        "order": {
+                            "status": "live",
+                            "remaining_size": "10.0",
+                        }
+                    }
+                },
+                "submitted": True,
+                "error": None,
+            }
+        ],
+    }
+    accepted = runtime.apply_buy_execution_result(result_payload=payload, now_epoch_ms=1_200)
+    assert accepted == 1
+    health = runtime.snapshot(now_epoch_ms=1_200)["health"]
+    pm_exposure = health["exposure_by_market"]["polymarket"]
+    kx_exposure = health["exposure_by_market"]["kalshi"]
+    assert pm_exposure["gross_position_exposure_usd"] == 0.0
+    assert pm_exposure["gross_open_order_exposure_usd"] == 6.0
+    assert pm_exposure["gross_total_exposure_usd"] == 6.0
+    assert pm_exposure["exposure_limit_exceeded"] is True
+    assert pm_exposure["buy_blocked"] is True
+    assert kx_exposure["gross_total_exposure_usd"] == 0.0
+    assert health["buy_execution_allowed"] is True
+
+
+def test_max_exposure_open_order_reserve_can_be_disabled() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=5.0,
+            include_pending_orders_in_exposure=False,
+        ),
+        now_epoch_ms=1_000,
+    )
+    payload = {
+        "signal_id": "sig-open-order-exposure-2",
+        "status": "submitted",
+        "legs": [
+            {
+                "venue": "kalshi",
+                "side": "yes",
+                "instrument_id": "KXBTC15M-TEST",
+                "client_order_id": "cid-open-2",
+                "request_payload": {
+                    "action": "buy",
+                    "size": 10.0,
+                    "limit_price": 0.7,
+                },
+                "response_payload": {
+                    "response": {
+                        "order": {
+                            "status": "open",
+                            "remaining_count_fp": "10.0",
+                        }
+                    }
+                },
+                "submitted": True,
+                "error": None,
+            }
+        ],
+    }
+    accepted = runtime.apply_buy_execution_result(result_payload=payload, now_epoch_ms=1_200)
+    assert accepted == 1
+    health = runtime.snapshot(now_epoch_ms=1_200)["health"]
+    kx_exposure = health["exposure_by_market"]["kalshi"]
+    assert kx_exposure["gross_open_order_exposure_usd"] == 0.0
+    assert kx_exposure["exposure_limit_exceeded"] is False
+    assert health["buy_execution_allowed"] is True
+
+
+def test_evaluate_execution_plan_blocks_all_buy_legs_when_any_market_exceeded() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=5.0,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+    runtime.apply_polymarket_confirmed_fill(
+        event_id="pm-trade-exposure-2",
+        instrument_id="pm_yes_token",
+        outcome_side="yes",
+        filled_contracts=10.0,
+        fill_price=0.6,
+        now_epoch_ms=1_100,
+    )
+
+    buy_plan = {
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "action": "buy",
+                "instrument_id": "pm_yes_token",
+            },
+            {
+                "venue": "kalshi",
+                "side": "no",
+                "action": "buy",
+                "instrument_id": "KXBTC15M-TEST",
+            },
+        ]
+    }
+    buy_gate = runtime.evaluate_execution_plan(execution_plan=buy_plan, now_epoch_ms=1_200)
+    assert buy_gate["allowed"] is False
+    assert buy_gate["blocked_markets"] == ["polymarket"]
+    assert len(buy_gate["blocked_legs"]) == 2
+    assert buy_gate["blocked_legs"][0]["venue"] == "polymarket"
+    assert buy_gate["blocked_legs"][0]["action"] == "buy"
+    assert buy_gate["blocked_legs"][1]["venue"] == "kalshi"
+    assert buy_gate["blocked_legs"][1]["action"] == "buy"
+
+    hedge_plan = {
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "action": "sell",
+                "instrument_id": "pm_yes_token",
+            },
+            {
+                "venue": "kalshi",
+                "side": "no",
+                "action": "buy",
+                "instrument_id": "KXBTC15M-TEST",
+            },
+        ]
+    }
+    hedge_gate = runtime.evaluate_execution_plan(execution_plan=hedge_plan, now_epoch_ms=1_200)
+    assert hedge_gate["allowed"] is False
+    assert hedge_gate["blocked_markets"] == ["polymarket"]
+    assert len(hedge_gate["blocked_legs"]) == 1
+    assert hedge_gate["blocked_legs"][0]["venue"] == "kalshi"
+    assert hedge_gate["blocked_legs"][0]["action"] == "buy"
+
+    sell_only_plan = {
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "action": "sell",
+                "instrument_id": "pm_yes_token",
+            },
+            {
+                "venue": "kalshi",
+                "side": "no",
+                "action": "sell",
+                "instrument_id": "KXBTC15M-TEST",
+            },
+        ]
+    }
+    sell_only_gate = runtime.evaluate_execution_plan(execution_plan=sell_only_plan, now_epoch_ms=1_200)
+    assert sell_only_gate["allowed"] is True
+    assert sell_only_gate["blocked_markets"] == ["polymarket"]
+    assert sell_only_gate["blocked_legs"] == []
+
+
+def test_order_lifecycle_ws_and_poll_remove_closed_orders_immediately() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+
+    submit_payload = {
+        "signal_id": "sig-ord-life-1",
+        "status": "submitted",
+        "legs": [
+            {
+                "venue": "kalshi",
+                "side": "yes",
+                "instrument_id": "KXBTC15M-TEST",
+                "client_order_id": "cid-life-1",
+                "request_payload": {
+                    "action": "buy",
+                    "size": 10.0,
+                    "limit_price": 0.6,
+                },
+                "response_payload": {
+                    "response": {
+                        "order": {
+                            "order_id": "oid-life-1",
+                            "status": "open",
+                            "remaining_count_fp": "10.0",
+                        }
+                    }
+                },
+                "submitted": True,
+                "error": None,
+            }
+        ],
+    }
+    runtime.apply_buy_execution_result(result_payload=submit_payload, now_epoch_ms=1_100)
+    assert runtime.orders_by_client_order_id.get("cid-life-1") is not None
+
+    ws_closed = runtime.apply_kalshi_user_order_event(
+        event_payload={
+            "event_id": "ev-kx-closed-1",
+            "client_order_id": "cid-life-1",
+            "order_id": "oid-life-1",
+            "market_ticker": "KXBTC15M-TEST",
+            "outcome_side": "yes",
+            "action": "buy",
+            "status": "FILLED",
+            "requested_size": 10.0,
+            "filled_size": 10.0,
+            "remaining_size": 0.0,
+            "limit_price": 0.6,
+        },
+        now_epoch_ms=1_200,
+    )
+    assert ws_closed is True
+    assert runtime.orders_by_client_order_id.get("cid-life-1") is None
+
+    reopen = runtime.reconcile_orders_snapshot(
+        venue="kalshi",
+        orders=[
+            {
+                "client_order_id": "cid-life-1",
+                "order_id": "oid-life-1",
+                "instrument_id": "KXBTC15M-TEST",
+                "outcome_side": "yes",
+                "action": "buy",
+                "status": "open",
+                "requested_size": 10.0,
+                "filled_size": 2.0,
+                "remaining_size": 8.0,
+                "limit_price": 0.6,
+            }
+        ],
+        snapshot_id="poll-kx-orders-open-1",
+        now_epoch_ms=1_300,
+    )
+    assert reopen["applied"] == 1
+    assert runtime.orders_by_client_order_id.get("cid-life-1") is not None
+
+    reconcile = runtime.reconcile_orders_snapshot(
+        venue="kalshi",
+        orders=[
+            {
+                "client_order_id": "cid-life-1",
+                "order_id": "oid-life-1",
+                "instrument_id": "KXBTC15M-TEST",
+                "outcome_side": "yes",
+                "action": "buy",
+                "status": "filled",
+                "requested_size": 10.0,
+                "filled_size": 10.0,
+                "remaining_size": 0.0,
+                "limit_price": 0.6,
+            }
+        ],
+        snapshot_id="poll-kx-orders-1",
+        now_epoch_ms=1_400,
+    )
+    assert reconcile["applied"] == 1
+    assert runtime.orders_by_client_order_id.get("cid-life-1") is None

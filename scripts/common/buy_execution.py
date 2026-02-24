@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import concurrent.futures as _futures
 from dataclasses import dataclass, field
 import hashlib
 import hmac
@@ -159,10 +160,13 @@ class BuyExecutionPlan:
 
 @dataclass(frozen=True)
 class LegSubmitResult:
+    leg_index: int
     venue: str
     side: str
     instrument_id: str
     client_order_id: str
+    submit_started_ms: int
+    submit_completed_ms: int
     request_payload: Dict[str, Any]
     response_payload: Optional[Dict[str, Any]]
     submitted: bool
@@ -170,10 +174,13 @@ class LegSubmitResult:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "leg_index": int(self.leg_index),
             "venue": self.venue,
             "side": self.side,
             "instrument_id": self.instrument_id,
             "client_order_id": self.client_order_id,
+            "submit_started_ms": int(self.submit_started_ms),
+            "submit_completed_ms": int(self.submit_completed_ms),
             "request_payload": dict(self.request_payload),
             "response_payload": None if self.response_payload is None else dict(self.response_payload),
             "submitted": bool(self.submitted),
@@ -1154,13 +1161,107 @@ def _resolve_client(*, venue: str, clients: BuyExecutionClients) -> Optional[Buy
     return None
 
 
+def _build_leg_request_payload(
+    *,
+    signal_id: str,
+    leg: BuyExecutionLeg,
+    client_order_id: str,
+) -> Dict[str, Any]:
+    return {
+        "signal_id": signal_id,
+        "venue": leg.venue,
+        "side": leg.side,
+        "action": leg.action,
+        "instrument_id": leg.instrument_id,
+        "order_kind": leg.order_kind,
+        "size": float(leg.size),
+        "limit_price": None if leg.limit_price is None else float(leg.limit_price),
+        "time_in_force": leg.time_in_force,
+        "client_order_id": client_order_id,
+    }
+
+
+def _submit_leg(
+    *,
+    leg_index: int,
+    signal_id: str,
+    leg: BuyExecutionLeg,
+    client_order_id: str,
+    clients: BuyExecutionClients,
+) -> LegSubmitResult:
+    submit_started_ms = now_ms()
+    request_payload = _build_leg_request_payload(
+        signal_id=signal_id,
+        leg=leg,
+        client_order_id=client_order_id,
+    )
+    client = _resolve_client(venue=leg.venue, clients=clients)
+    if client is None:
+        submit_completed_ms = now_ms()
+        return LegSubmitResult(
+            leg_index=int(leg_index),
+            venue=leg.venue,
+            side=leg.side,
+            instrument_id=leg.instrument_id,
+            client_order_id=client_order_id,
+            submit_started_ms=submit_started_ms,
+            submit_completed_ms=submit_completed_ms,
+            request_payload=request_payload,
+            response_payload=None,
+            submitted=False,
+            error=f"missing_client_for_venue:{leg.venue}",
+        )
+
+    try:
+        response = client.place_buy_order(
+            instrument_id=leg.instrument_id,
+            side=leg.side,
+            size=float(leg.size),
+            order_kind=leg.order_kind,
+            limit_price=leg.limit_price,
+            time_in_force=leg.time_in_force,
+            client_order_id=client_order_id,
+        )
+        submit_completed_ms = now_ms()
+        return LegSubmitResult(
+            leg_index=int(leg_index),
+            venue=leg.venue,
+            side=leg.side,
+            instrument_id=leg.instrument_id,
+            client_order_id=client_order_id,
+            submit_started_ms=submit_started_ms,
+            submit_completed_ms=submit_completed_ms,
+            request_payload=request_payload,
+            response_payload=dict(response or {}),
+            submitted=True,
+            error=None,
+        )
+    except Exception as exc:
+        submit_completed_ms = now_ms()
+        return LegSubmitResult(
+            leg_index=int(leg_index),
+            venue=leg.venue,
+            side=leg.side,
+            instrument_id=leg.instrument_id,
+            client_order_id=client_order_id,
+            submit_started_ms=submit_started_ms,
+            submit_completed_ms=submit_completed_ms,
+            request_payload=request_payload,
+            response_payload=None,
+            submitted=False,
+            error=f"{type(exc).__name__}:{exc}",
+        )
+
+
 def execute_cross_venue_buy(
     plan: BuyExecutionPlan,
     clients: BuyExecutionClients,
     state: BuyIdempotencyState,
     now_epoch_ms: Optional[int] = None,
+    parallel_leg_timeout_ms: Optional[int] = 4000,
 ) -> BuyExecutionResult:
     submitted_at = int(now_epoch_ms if now_epoch_ms is not None else now_ms())
+    leg_timeout_ms = max(100, int(parallel_leg_timeout_ms if parallel_leg_timeout_ms is not None else 4000))
 
     if state.is_in_flight_or_completed(plan.signal_id):
         prior = state.get(plan.signal_id)
@@ -1185,78 +1286,108 @@ def execute_cross_venue_buy(
         client_order_ids={f"leg_{idx + 1}": client_order_ids[idx] for idx in range(len(client_order_ids))},
     )
 
-    leg_results: List[LegSubmitResult] = []
-    submitted_count = 0
-
-    for idx, leg in enumerate(plan.legs):
-        client_order_id = client_order_ids[idx]
-        request_payload = {
-            "signal_id": plan.signal_id,
-            "venue": leg.venue,
-            "side": leg.side,
-            "action": leg.action,
-            "instrument_id": leg.instrument_id,
-            "order_kind": leg.order_kind,
-            "size": float(leg.size),
-            "limit_price": None if leg.limit_price is None else float(leg.limit_price),
-            "time_in_force": leg.time_in_force,
-            "client_order_id": client_order_id,
-        }
-
-        client = _resolve_client(venue=leg.venue, clients=clients)
-        if client is None:
-            leg_results.append(
-                LegSubmitResult(
-                    venue=leg.venue,
-                    side=leg.side,
-                    instrument_id=leg.instrument_id,
-                    client_order_id=client_order_id,
-                    request_payload=request_payload,
-                    response_payload=None,
-                    submitted=False,
-                    error=f"missing_client_for_venue:{leg.venue}",
-                )
-            )
-            continue
-
-        try:
-            response = client.place_buy_order(
-                instrument_id=leg.instrument_id,
-                side=leg.side,
-                size=float(leg.size),
-                order_kind=leg.order_kind,
-                limit_price=leg.limit_price,
-                time_in_force=leg.time_in_force,
-                client_order_id=client_order_id,
-            )
-            leg_results.append(
-                LegSubmitResult(
-                    venue=leg.venue,
-                    side=leg.side,
-                    instrument_id=leg.instrument_id,
-                    client_order_id=client_order_id,
-                    request_payload=request_payload,
-                    response_payload=dict(response or {}),
-                    submitted=True,
-                    error=None,
-                )
-            )
-            submitted_count += 1
-        except Exception as exc:
-            leg_results.append(
-                LegSubmitResult(
-                    venue=leg.venue,
-                    side=leg.side,
-                    instrument_id=leg.instrument_id,
-                    client_order_id=client_order_id,
-                    request_payload=request_payload,
-                    response_payload=None,
-                    submitted=False,
-                    error=f"{type(exc).__name__}:{exc}",
-                )
-            )
-
     total = len(plan.legs)
+    results_by_index: Dict[int, LegSubmitResult] = {}
+    started_by_index: Dict[int, int] = {}
+    futures_by_index: Dict[int, _futures.Future[LegSubmitResult]] = {}
+    executor = _futures.ThreadPoolExecutor(max_workers=max(1, total))
+    try:
+        for idx, leg in enumerate(plan.legs):
+            started_by_index[idx] = now_ms()
+            futures_by_index[idx] = executor.submit(
+                _submit_leg,
+                leg_index=idx,
+                signal_id=plan.signal_id,
+                leg=leg,
+                client_order_id=client_order_ids[idx],
+                clients=clients,
+            )
+
+        done, not_done = _futures.wait(
+            list(futures_by_index.values()),
+            timeout=float(leg_timeout_ms) / 1000.0,
+            return_when=_futures.ALL_COMPLETED,
+        )
+
+        future_index_map = {future: idx for idx, future in futures_by_index.items()}
+        for future in done:
+            idx = future_index_map[future]
+            try:
+                results_by_index[idx] = future.result()
+            except Exception as exc:
+                leg = plan.legs[idx]
+                submit_completed_ms = now_ms()
+                results_by_index[idx] = LegSubmitResult(
+                    leg_index=int(idx),
+                    venue=leg.venue,
+                    side=leg.side,
+                    instrument_id=leg.instrument_id,
+                    client_order_id=client_order_ids[idx],
+                    submit_started_ms=int(started_by_index.get(idx, submit_completed_ms)),
+                    submit_completed_ms=submit_completed_ms,
+                    request_payload=_build_leg_request_payload(
+                        signal_id=plan.signal_id,
+                        leg=leg,
+                        client_order_id=client_order_ids[idx],
+                    ),
+                    response_payload=None,
+                    submitted=False,
+                    error=f"worker_failure:{type(exc).__name__}:{exc}",
+                )
+
+        for future in not_done:
+            idx = future_index_map[future]
+            leg = plan.legs[idx]
+            submit_completed_ms = now_ms()
+            results_by_index[idx] = LegSubmitResult(
+                leg_index=int(idx),
+                venue=leg.venue,
+                side=leg.side,
+                instrument_id=leg.instrument_id,
+                client_order_id=client_order_ids[idx],
+                submit_started_ms=int(started_by_index.get(idx, submit_completed_ms)),
+                submit_completed_ms=submit_completed_ms,
+                request_payload=_build_leg_request_payload(
+                    signal_id=plan.signal_id,
+                    leg=leg,
+                    client_order_id=client_order_ids[idx],
+                ),
+                response_payload=None,
+                submitted=False,
+                error=f"timeout_after_ms:{leg_timeout_ms}",
+            )
+            future.cancel()
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    leg_results: List[LegSubmitResult] = []
+    for idx, leg in enumerate(plan.legs):
+        if idx in results_by_index:
+            leg_results.append(results_by_index[idx])
+            continue
+        submit_completed_ms = now_ms()
+        leg_results.append(
+            LegSubmitResult(
+                leg_index=int(idx),
+                venue=leg.venue,
+                side=leg.side,
+                instrument_id=leg.instrument_id,
+                client_order_id=client_order_ids[idx],
+                submit_started_ms=int(started_by_index.get(idx, submit_completed_ms)),
+                submit_completed_ms=submit_completed_ms,
+                request_payload=_build_leg_request_payload(
+                    signal_id=plan.signal_id,
+                    leg=leg,
+                    client_order_id=client_order_ids[idx],
+                ),
+                response_payload=None,
+                submitted=False,
+                error="missing_parallel_result",
+            )
+        )
+
+    submitted_count = sum(1 for leg_result in leg_results if bool(leg_result.submitted))
+
     if submitted_count == total:
         status = "submitted"
         error = None

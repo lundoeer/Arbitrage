@@ -9,7 +9,13 @@ from scripts.common.engine_logger import EngineLogger
 from scripts.common.edge_snapshots import build_edge_snapshot as _build_edge_snapshot
 from scripts.common.position_polling import PositionReconcileLoop
 from scripts.common.position_runtime import PositionRuntime
-from scripts.common.ws_collectors import KalshiMarketPositionsWsCollector, KalshiWsCollector, PolymarketUserWsCollector, PolymarketWsCollector
+from scripts.common.ws_collectors import (
+    KalshiMarketPositionsWsCollector,
+    KalshiUserOrdersWsCollector,
+    KalshiWsCollector,
+    PolymarketUserWsCollector,
+    PolymarketWsCollector,
+)
 from scripts.common.ws_transport import now_ms, utc_now_iso
 from scripts.common.utils import as_dict as _as_dict, as_float as _as_float
 
@@ -20,6 +26,7 @@ async def run_core_loop(
     kalshi_collector: KalshiWsCollector,
     polymarket_collector: PolymarketWsCollector,
     kalshi_market_positions_collector: Optional[KalshiMarketPositionsWsCollector],
+    kalshi_user_orders_collector: Optional[KalshiUserOrdersWsCollector],
     polymarket_user_collector: Optional[PolymarketUserWsCollector],
     runtime: SharePriceRuntime,
     position_runtime: Optional[PositionRuntime],
@@ -37,11 +44,13 @@ async def run_core_loop(
     buy_idempotency_state: BuyIdempotencyState,
     buy_execution_cooldown_ms: int,
     buy_execution_max_attempts: int,
+    buy_execution_parallel_leg_timeout_ms: int,
     buy_execution_attempt_state: Dict[str, int],
 ) -> Dict[str, Any]:
     buy_fsm = BuyFsmRuntime.initialize()
     cooldown_ms = max(0, int(buy_execution_cooldown_ms))
     max_attempts = max(0, int(buy_execution_max_attempts))
+    parallel_leg_timeout_ms = max(100, int(buy_execution_parallel_leg_timeout_ms))
     if "attempts_used" not in buy_execution_attempt_state:
         buy_execution_attempt_state["attempts_used"] = 0
     if "submission_seq" not in buy_execution_attempt_state:
@@ -72,8 +81,13 @@ async def run_core_loop(
         "position_poll_polymarket_failure": 0,
         "position_poll_kalshi_success": 0,
         "position_poll_kalshi_failure": 0,
+        "position_poll_polymarket_orders_success": 0,
+        "position_poll_polymarket_orders_failure": 0,
+        "position_poll_kalshi_orders_success": 0,
+        "position_poll_kalshi_orders_failure": 0,
         "position_ws_polymarket_user_events": 0,
         "position_ws_kalshi_market_position_events": 0,
+        "position_ws_kalshi_user_order_events": 0,
         "position_health_state_changes": 0,
         "position_health_allowed_samples": 0,
         "position_health_blocked_samples": 0,
@@ -217,71 +231,91 @@ async def run_core_loop(
                             "reason": "execution_plan_missing_signal_id",
                         }
                     else:
-                        submission_seq = int(buy_execution_attempt_state.get("submission_seq", 0)) + 1
-                        buy_execution_attempt_state["submission_seq"] = int(submission_seq)
-                        signal_id = f"{base_signal_id}__s{submission_seq}"
-                        plan_payload["signal_id"] = signal_id
-                        buy_fsm.begin_submission(
-                            signal_id=signal_id,
-                            now_epoch_ms=now_epoch_ms,
-                            reason="decision_can_trade",
-                        )
-                        buy_execution_attempt_state["attempts_used"] = int(attempts_used + 1)
-                        stats["buy_execution_attempts"] += 1
-                        try:
-                            plan = BuyExecutionPlan.from_dict(plan_payload)
-                            result = execute_cross_venue_buy(
-                                plan=plan,
-                                clients=buy_execution_clients,
-                                state=buy_idempotency_state,
+                        plan_gate = None
+                        if position_runtime is not None:
+                            plan_gate = position_runtime.evaluate_execution_plan(
+                                execution_plan=plan_payload,
                                 now_epoch_ms=now_epoch_ms,
                             )
-                            result_payload = result.to_dict()
-                            if position_runtime is not None:
-                                position_runtime.apply_buy_execution_result(
+                            position_health = _as_dict(plan_gate.get("position_health"))
+                            stats["last_position_health"] = position_health
+                        if plan_gate is not None and not bool(plan_gate.get("allowed")):
+                            stats["buy_execution_blocked_position_health"] += 1
+                            buy_execution_event = {
+                                "status": "blocked_position_health",
+                                "reason": "position_buy_execution_not_allowed",
+                                "position_health": position_health,
+                                "position_gate_reasons": list(plan_gate.get("reasons") or []),
+                                "blocked_markets": list(plan_gate.get("blocked_markets") or []),
+                                "blocked_legs": list(plan_gate.get("blocked_legs") or []),
+                            }
+                        else:
+                            submission_seq = int(buy_execution_attempt_state.get("submission_seq", 0)) + 1
+                            buy_execution_attempt_state["submission_seq"] = int(submission_seq)
+                            signal_id = f"{base_signal_id}__s{submission_seq}"
+                            plan_payload["signal_id"] = signal_id
+                            buy_fsm.begin_submission(
+                                signal_id=signal_id,
+                                now_epoch_ms=now_epoch_ms,
+                                reason="decision_can_trade",
+                            )
+                            buy_execution_attempt_state["attempts_used"] = int(attempts_used + 1)
+                            stats["buy_execution_attempts"] += 1
+                            try:
+                                plan = BuyExecutionPlan.from_dict(plan_payload)
+                                result = execute_cross_venue_buy(
+                                    plan=plan,
+                                    clients=buy_execution_clients,
+                                    state=buy_idempotency_state,
+                                    now_epoch_ms=now_epoch_ms,
+                                    parallel_leg_timeout_ms=parallel_leg_timeout_ms,
+                                )
+                                result_payload = result.to_dict()
+                                if position_runtime is not None:
+                                    position_runtime.apply_buy_execution_result(
+                                        result_payload=result_payload,
+                                        now_epoch_ms=now_ms(),
+                                    )
+                                buy_fsm.complete_submission(
                                     result_payload=result_payload,
                                     now_epoch_ms=now_ms(),
+                                    cooldown_ms=cooldown_ms,
                                 )
-                            buy_fsm.complete_submission(
-                                result_payload=result_payload,
-                                now_epoch_ms=now_ms(),
-                                cooldown_ms=cooldown_ms,
-                            )
-                            stats["last_buy_execution"] = result_payload
-                            status = str(result_payload.get("status") or "")
-                            if status == "submitted":
-                                stats["buy_execution_submitted"] += 1
-                            elif status == "partially_submitted":
-                                stats["buy_execution_partially_submitted"] += 1
-                            elif status == "rejected":
-                                stats["buy_execution_rejected"] += 1
-                            elif status == "skipped_idempotent":
-                                stats["buy_execution_skipped_idempotent"] += 1
-                            else:
+                                stats["last_buy_execution"] = result_payload
+                                status = str(result_payload.get("status") or "")
+                                if status == "submitted":
+                                    stats["buy_execution_submitted"] += 1
+                                elif status == "partially_submitted":
+                                    stats["buy_execution_partially_submitted"] += 1
+                                elif status == "rejected":
+                                    stats["buy_execution_rejected"] += 1
+                                elif status == "skipped_idempotent":
+                                    stats["buy_execution_skipped_idempotent"] += 1
+                                else:
+                                    stats["buy_execution_errors"] += 1
+                                buy_execution_event = {
+                                    "status": "executed",
+                                    "result": result_payload,
+                                }
+                            except Exception as exc:
+                                error_payload = {
+                                    "signal_id": signal_id,
+                                    "status": "error",
+                                    "error": f"{type(exc).__name__}:{exc}",
+                                    "at_ms": now_ms(),
+                                }
+                                buy_fsm.fail_submission(
+                                    signal_id=signal_id,
+                                    error_payload=error_payload,
+                                    now_epoch_ms=now_ms(),
+                                    reason="submit_exception",
+                                )
                                 stats["buy_execution_errors"] += 1
-                            buy_execution_event = {
-                                "status": "executed",
-                                "result": result_payload,
-                            }
-                        except Exception as exc:
-                            error_payload = {
-                                "signal_id": signal_id,
-                                "status": "error",
-                                "error": f"{type(exc).__name__}:{exc}",
-                                "at_ms": now_ms(),
-                            }
-                            buy_fsm.fail_submission(
-                                signal_id=signal_id,
-                                error_payload=error_payload,
-                                now_epoch_ms=now_ms(),
-                                reason="submit_exception",
-                            )
-                            stats["buy_execution_errors"] += 1
-                            stats["last_buy_execution"] = error_payload
-                            buy_execution_event = {
-                                "status": "error",
-                                "error": error_payload,
-                            }
+                                stats["last_buy_execution"] = error_payload
+                                buy_execution_event = {
+                                    "status": "error",
+                                    "error": error_payload,
+                                }
 
             buy_fsm_after = buy_fsm.snapshot()
             decision_payload = {
@@ -316,6 +350,7 @@ async def run_core_loop(
                         "execution_plan": decision.execution_plan,
                         "execution_plan_reasons": decision.execution_plan_reasons,
                         "buy_execution_enabled": bool(buy_execution_enabled),
+                        "buy_execution_parallel_leg_timeout_ms": int(parallel_leg_timeout_ms),
                         "buy_execution": buy_execution_event,
                         "buy_fsm_before": buy_fsm_before,
                         "buy_fsm_after": buy_fsm_after,
@@ -391,9 +426,33 @@ async def run_core_loop(
     async def _position_poll_loop(stop: asyncio.Event) -> None:
         if position_reconcile_loop is None:
             return
+
+        def _write_position_poll_raw_entries(result_payload: Dict[str, Any]) -> None:
+            venues = _as_dict(result_payload).get("venues")
+            venue_rows = venues if isinstance(venues, dict) else {}
+            for venue_name in ("polymarket", "kalshi"):
+                venue_payload = _as_dict(venue_rows.get(venue_name))
+                if not venue_payload:
+                    continue
+                logger.write_position_poll_raw(
+                    recv_ms=now_ms(),
+                    venue=venue_name,
+                    payload={
+                        "market": market_context,
+                        "at_ms": _as_dict(result_payload).get("at_ms"),
+                        "result": {
+                            "status": venue_payload.get("status"),
+                            "snapshot": venue_payload.get("snapshot"),
+                            "reconcile": venue_payload.get("reconcile"),
+                            "orders": venue_payload.get("orders"),
+                        },
+                    },
+                )
+
         poll_s = max(0.05, float(position_reconcile_loop.config.loop_sleep_seconds))
         bootstrap_result = position_reconcile_loop.run_once(now_epoch_ms=now_ms(), force=True)
         stats["last_position_poll"] = bootstrap_result
+        _write_position_poll_raw_entries(bootstrap_result)
 
         logger.write_position_event(
             recv_ms=now_ms(),
@@ -408,6 +467,7 @@ async def run_core_loop(
             result = position_reconcile_loop.run_once(now_epoch_ms=now_ms(), force=False)
             if bool(_as_dict(result).get("venues")):
                 stats["last_position_poll"] = result
+                _write_position_poll_raw_entries(result)
                 logger.write_position_event(
                     recv_ms=now_ms(),
                     sub_kind="poll_snapshot",
@@ -422,11 +482,26 @@ async def run_core_loop(
                 stats["position_ws_kalshi_market_position_events"] = int(
                     position_event_state.get("kalshi_market_position_events", 0)
                 )
+                stats["position_ws_kalshi_user_order_events"] = int(
+                    position_event_state.get("kalshi_user_order_events", 0)
+                )
             stats["position_poll_iterations"] = int(position_reconcile_loop.stats.get("poll_iterations", 0))
             stats["position_poll_polymarket_success"] = int(position_reconcile_loop.stats.get("polymarket_success", 0))
             stats["position_poll_polymarket_failure"] = int(position_reconcile_loop.stats.get("polymarket_failure", 0))
             stats["position_poll_kalshi_success"] = int(position_reconcile_loop.stats.get("kalshi_success", 0))
             stats["position_poll_kalshi_failure"] = int(position_reconcile_loop.stats.get("kalshi_failure", 0))
+            stats["position_poll_polymarket_orders_success"] = int(
+                position_reconcile_loop.stats.get("polymarket_orders_success", 0)
+            )
+            stats["position_poll_polymarket_orders_failure"] = int(
+                position_reconcile_loop.stats.get("polymarket_orders_failure", 0)
+            )
+            stats["position_poll_kalshi_orders_success"] = int(
+                position_reconcile_loop.stats.get("kalshi_orders_success", 0)
+            )
+            stats["position_poll_kalshi_orders_failure"] = int(
+                position_reconcile_loop.stats.get("kalshi_orders_failure", 0)
+            )
             await asyncio.sleep(poll_s)
 
     stop_event = asyncio.Event()
@@ -442,6 +517,8 @@ async def run_core_loop(
         tasks.append(asyncio.create_task(polymarket_user_collector.run(stop_event)))
     if kalshi_market_positions_collector is not None:
         tasks.append(asyncio.create_task(kalshi_market_positions_collector.run(stop_event)))
+    if kalshi_user_orders_collector is not None:
+        tasks.append(asyncio.create_task(kalshi_user_orders_collector.run(stop_event)))
     try:
         if int(duration_seconds) > 0:
             await asyncio.sleep(int(duration_seconds))
@@ -460,10 +537,25 @@ async def run_core_loop(
         stats["position_poll_polymarket_failure"] = int(position_reconcile_loop.stats.get("polymarket_failure", 0))
         stats["position_poll_kalshi_success"] = int(position_reconcile_loop.stats.get("kalshi_success", 0))
         stats["position_poll_kalshi_failure"] = int(position_reconcile_loop.stats.get("kalshi_failure", 0))
+        stats["position_poll_polymarket_orders_success"] = int(
+            position_reconcile_loop.stats.get("polymarket_orders_success", 0)
+        )
+        stats["position_poll_polymarket_orders_failure"] = int(
+            position_reconcile_loop.stats.get("polymarket_orders_failure", 0)
+        )
+        stats["position_poll_kalshi_orders_success"] = int(
+            position_reconcile_loop.stats.get("kalshi_orders_success", 0)
+        )
+        stats["position_poll_kalshi_orders_failure"] = int(
+            position_reconcile_loop.stats.get("kalshi_orders_failure", 0)
+        )
     if position_event_state is not None:
         stats["position_ws_polymarket_user_events"] = int(position_event_state.get("polymarket_user_events", 0))
         stats["position_ws_kalshi_market_position_events"] = int(
             position_event_state.get("kalshi_market_position_events", 0)
+        )
+        stats["position_ws_kalshi_user_order_events"] = int(
+            position_event_state.get("kalshi_user_order_events", 0)
         )
     if position_runtime is not None:
         stats["last_position_health"] = position_runtime.refresh_health(now_epoch_ms=now_ms())

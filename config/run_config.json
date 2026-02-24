@@ -15,13 +15,17 @@
   },
   "buy": {
     "min_gross_edge_threshold": 0.05,
-    "max_spend_per_market_usd": 10.0,
-    "max_size_cap_per_leg": 20.0
+    "max_spend_per_market_usd": 20.0,
+    "max_size_cap_per_leg": 20.0,
+    "min_size_per_leg_contracts": 5.0,
+    "min_notional_per_leg_usd": 2.0,
+    "best_ask_size_safety_factor": 0.5
   },
   "buy_execution": {
     "enabled": true,
-    "cooldown_ms": 30000,
-    "max_attempts_per_run": 2,
+    "cooldown_ms": 17000,
+    "max_attempts_per_run": 3,
+    "parallel_leg_timeout_ms": 4000,
     "api_retry": {
       "enabled": true,
       "max_attempts": 3,
@@ -35,17 +39,22 @@
     "require_bootstrap_before_buy": true,
     "polymarket_user_ws_enabled": true,
     "kalshi_market_positions_ws_enabled": true,
-    "polymarket_poll_seconds": 10.0,
-    "kalshi_poll_seconds": 20.0,
+    "kalshi_user_orders_ws_enabled": true,
+    "polymarket_poll_seconds": 15.0,
+    "kalshi_poll_seconds": 15.0,
+    "polymarket_orders_poll_seconds": 30.0,
+    "kalshi_orders_poll_seconds": 30.0,
     "loop_sleep_seconds": 0.2,
     "drift_tolerance_contracts": 0.0,
-    "stale_warning_seconds": 60,
-    "stale_error_seconds": 180
+    "max_exposure_per_market_usd": 12.0,
+    "include_pending_orders_in_exposure": true,
+    "stale_warning_seconds": 45,
+    "stale_error_seconds": 60
   },
   "execution": {
     "best_ask_and_bids_at_max": 0.88,
     "best_ask_and_bids_at_min": 0.12,
-    "market_start_trade_time_seconds": 120,
+    "market_start_trade_time_seconds": 60,
     "market_end_trade_time_seconds": 120
   }
 }

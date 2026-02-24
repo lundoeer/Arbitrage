@@ -1,184 +1,253 @@
 # Position Monitoring Architecture
 
-Last updated: 2026-02-22  
-Scope: Cross-venue Position Reconciliation & Tracking
+Last updated: 2026-02-24  
+Scope: Cross-venue Position and Order-State Reconciliation
 
 ## Objective
 
-The position monitoring system combines:
+The monitoring system combines:
 
-1. Order submit responses (`execute_cross_venue_buy` results) for immediate in-memory updates.
+1. Submit responses (`buy_execution` results) for immediate in-memory order updates.
 2. Polymarket user websocket channel for continuous order/trade lifecycle updates.
-3. Polymarket positions REST endpoint for periodic reconciliation.
-4. Kalshi `market_positions` websocket channel for continuous position updates.
-5. Kalshi portfolio positions REST endpoint for periodic reconciliation.
+3. Kalshi `market_positions` websocket channel for continuous position updates.
+4. Kalshi `user_orders` websocket channel for continuous order lifecycle updates.
+5. Polymarket positions REST endpoint for authoritative periodic position reconciliation.
+6. Kalshi positions REST endpoint for authoritative periodic position reconciliation.
+7. Polymarket + Kalshi orders REST endpoints for authoritative periodic order reconciliation.
 
-This hybrid model enables fast streaming updates gated by periodic authoritative checks.
+This hybrid model keeps fast streaming behavior while continuously correcting to authoritative snapshots.
 
 ## Design Constraints & Decisions
 
-1. Polymarket user-channel subscription is scoped to the active Polymarket market for the current discovered pair.
-2. Discovery output includes the Polymarket `conditionId` mapping.
-3. Polymarket fill delta is applied only on `CONFIRMED` trade lifecycle state.
-4. Startup is fail-closed for buy execution if initial position bootstrap fails, with automatic re-enable once later position polls succeed.
-5. Monitoring scope is strictly the currently selected pair, not account-wide positions.
-6. State remains in-memory only, with REST bootstrap/reconciliation acting as the recovery mechanism (no persisted local database state).
+1. Monitoring scope is the active discovered market pair only (not portfolio-wide).
+2. Polymarket user channel subscription is scoped to the active condition.
+3. Kalshi user orders websocket is scoped to the active ticker.
+4. Polymarket fill delta is applied only on `CONFIRMED` trade events.
+5. Position bootstrap/staleness remains fail-closed for buy execution.
+6. Order-state reconciliation affects exposure/order accounting only; it is not a separate hard global gate.
+7. Order merge precedence is fixed: `submit_ack < websocket < REST poll snapshot`.
+8. Closed orders are removed immediately from runtime (history lives in logs).
 
-## Key Architecture
-
-The hybrid model pairs low-latency event-driven updates with periodic snapshot reconciliation for correctness.
-
-Since no dedicated Polymarket position websocket exists, the user channel's `order` and `trade` events are normalized, and Polymarket position state is inferred from confirmed fills and reconciled against REST snapshots.
-
-## Source Roles and Trust Order
+## Source Roles and Trust
 
 ### Polymarket
 
-- `Source A`: submit response (`buy_execution` result)  
-  role: create pending order records quickly  
-  trust: low for filled size
-
-- `Source B`: user channel `trade` / `order`  
-  role: near-real-time fill lifecycle tracking  
-  trust: medium (event-ordering and retries can happen)
-
-- `Source C`: `GET /positions`  
-  role: authoritative reconciliation  
-  trust: high
+- Submit response: immediate order record seed, low trust.
+- User websocket (`trade` / `order`): near-real-time lifecycle, medium trust.
+- Positions REST: authoritative position snapshot, high trust.
+  - Poll query uses `user`, `market=<active conditionId>`, `sizeThreshold=0`.
+  - Normalization uses `initialValue` as position exposure (fallback `size * avgPrice`).
+- Orders REST: authoritative order snapshot, high trust.
 
 ### Kalshi
 
-- `Source A`: submit response (`buy_execution` result)  
-  role: create pending order records quickly  
-  trust: low for final filled size
-
-- `Source B`: `market_positions` websocket  
-  role: near-real-time position updates  
-  trust: high for current position
-
-- `Source C`: `GET /portfolio/positions`  
-  role: authoritative reconciliation and recovery  
-  trust: high
+- Submit response: immediate order record seed, low trust.
+- `market_positions` websocket: near-real-time position updates, high trust for position.
+- `user_orders` websocket: near-real-time order lifecycle, medium trust.
+- Positions REST: authoritative position snapshot, high trust.
+  - Normalization prefers `market_exposure_dollars` as position exposure.
+- Orders REST: authoritative order snapshot, high trust.
 
 ## Module Layout
 
-- `scripts/common/position_runtime.py`: `PositionRuntime` maintains the canonical per-venue state, orders, and health metrics using strict `@dataclass` structures.
-- `scripts/common/position_polling.py`: Contains API polling clients and the periodic `PositionReconcileLoop`.
-- `scripts/common/ws_collectors.py`: Houses `PolymarketUserWsCollector` and `KalshiMarketPositionsWsCollector`.
-- `scripts/run/arbitrage_engine.py`: Wires runtime instances, collectors, the polling loop, and health gates.
-- `scripts/common/engine_setup.py`: Constructs position components based on configuration.
+- `scripts/common/position_runtime.py`
+  - canonical in-memory positions/orders
+  - order/position update merge logic
+  - health + exposure accounting
+- `scripts/common/position_polling.py`
+  - positions + orders poll clients
+  - `PositionReconcileLoop` orchestration
+- `scripts/common/ws_collectors.py`
+  - `PolymarketUserWsCollector`
+  - `KalshiMarketPositionsWsCollector`
+  - `KalshiUserOrdersWsCollector`
+- `scripts/common/ws_normalization.py`
+  - user/position/order event normalization
+- `scripts/run/arbitrage_engine.py`
+  - wiring callbacks, collectors, runtime, and reconcile loop
+- `scripts/run/engine_loop.py`
+  - runs polling loop task + logging integration
 
-## Canonical In-Memory Model
+## Canonical Runtime Model
 
-### `PositionState` structure
+### Position model
 
-The canonical position state tracked by `PositionRuntime`:
+Tracked by `(venue, instrument_id, outcome_side)` with:
 
-- `net_contracts`: Current net held quantity
-- `avg_entry_price`: Computed VWAP of entry
-- `realized_pnl`: (if available from venue sources)
-- `fees`: (if available)
-- `last_update_ms`: Timestamp
-- `last_source`: (`submit_ack`, `user_ws`, `positions_ws`, `positions_poll`)
-- `is_authoritative`: true when set from trusted snapshot/ws position source
+- `net_contracts`
+- `avg_entry_price`
+- `position_exposure_usd` (authoritative when returned by REST normalization)
+- `last_source`, `last_update_ms`
+- `is_authoritative`
 
-### Canonical position key
+### Order model
 
-- `venue`: `polymarket` or `kalshi`
-- `instrument_id`: Polymarket token ID or Kalshi ticker
-- `outcome_side`: `yes` or `no`
+Tracked by `client_order_id` with order-id back-reference when present:
 
-## Update and Reconciliation Rules
+- `client_order_id`, `order_id`
+- `venue`, `instrument_id`, `outcome_side`, `action`
+- `status` (normalized)
+- `requested_size`, `filled_size`, `remaining_size`
+- `limit_price`
+- `last_source`, `source_rank`, `last_update_ms`
 
-### Rule 1: Submit-response ingestion (source 1)
+Normalized statuses:
 
-On `buy_execution` result:
+- `open`
+- `partially_filled`
+- `filled`
+- `canceled`
+- `rejected`
+- `expired`
+- `failed`
 
-- Record/refresh order state keyed by `client_order_id`.
-- Store venue order ID if present in API response.
-- Mark status as `submitted` or `pending`.
-- Do not treat as filled unless explicit fill fields are present.
+Terminal statuses are removed from runtime immediately.
 
-### Rule 2: Polymarket user channel ingestion (source 2)
+## Update Rules
 
-Normalize `trade` and `order` events.
+### Rule 1: Submit-response ingestion
+
+On `buy_execution` results:
+
+- upsert order state from leg request/response
+- apply explicit fill delta only when fill quantity is present in submit response
+
+### Rule 2: Polymarket user channel
 
 - `trade` events:
-  - apply position/fill deltas only on `CONFIRMED`.
-  - `MATCHED`/`MINED`/other pre-confirm states update order lifecycle only, not net position.
-  - `FAILED` updates order status and does not affect position unless a prior `CONFIRMED` correction is required.
+  - apply position delta only on `CONFIRMED`
 - `order` events:
-  - update lifecycle status (`LIVE`, `DELAYED`, `MATCHED`, `UNMATCHED`, `MINED`, `CONFIRMED`, `RETRYING`, `FAILED`).
-  - update cumulative filled size if provided.
+  - upsert order lifecycle fields (status/sizes/price identifiers)
 
-Deduplication occurs via trade/order IDs within `PositionRuntime`.
+### Rule 3: Kalshi market_positions websocket
 
-### Rule 3: Kalshi market_positions ingestion (source 4)
+- apply absolute yes/no position values for active ticker
+- mark position updates as authoritative stream values
 
-Treat each `market_position` event as an absolute position update.
+### Rule 4: Kalshi user_orders websocket
 
-- Upsert the corresponding Kalshi position key.
-- Mark as authoritative.
-- Update order correlation if order identifiers are present.
+- upsert order lifecycle fields for active ticker
+- close/remove order record immediately when status is terminal
 
-### Rule 4: Periodic REST reconciliation (sources 3 and 5)
+### Rule 5: REST reconciliation (positions + orders)
 
-Poll both venues on a configurable timer (e.g. 10s Poly, 20s Kalshi).
+On poll cadence:
 
-- Polymarket:
-  - pull current positions by user.
-  - overwrite canonical Polymarket position values for tracked instruments.
-- Kalshi:
-  - pull portfolio positions (paginate with `cursor`).
-  - overwrite canonical Kalshi position values.
+- positions snapshots overwrite tracked position state per venue
+- orders snapshots reconcile tracked orders per venue with highest precedence
+- if positions REST payload is null/malformed, reconcile is skipped for that venue
+  (runtime keeps prior position state; venue is marked reconcile failure)
+- when an orders snapshot is marked complete for a venue, runtime prunes local
+  venue order records that are missing from that snapshot (after a short grace
+  window) to prevent stale open-order exposure from persisting
 
-After overwrite, drift counters are incremented if the state was misaligned, and health flags are cleared.
+Order precedence is deterministic:
 
-### Rule 5: Drift handling
+- submit ack (rank 1)
+- websocket update (rank 2)
+- poll snapshot (rank 3)
 
-If a stream-derived value differs materially from a poll snapshot:
+Order snapshot completeness:
 
-- Record drift in counters.
-- Trust the poll snapshot as the absolute source of truth.
+- runtime only performs missing-order prune when snapshot is complete
+  (`truncated_by_max_pages=false`)
+- this avoids accidental drops when a paginated poll is truncated
+- prune uses a 5-second grace window based on order `last_update_ms` to reduce
+  race conditions between websocket and poll updates
 
-## Polling and Freshness Strategy
+## Polling and Freshness
 
-### Startup bootstrap
+### Startup behavior
 
-Before enabling live buy execution in a segment:
+Before active buy execution in a segment:
 
-1. Run one Polymarket positions poll.
-2. Run one Kalshi positions poll (via the polling loop).
-3. Initialize `PositionRuntime` limits and set health to `buy_execution_allowed=True`.
+1. positions poll bootstrap (both venues)
+2. orders poll bootstrap (both venues)
+3. runtime health/exposure initialized from current snapshots
 
 ### Staleness thresholds
 
-- `warning_stale` triggers if no authoritative update for a venue occurs in `>60s` (configurable)
-- `hard_stale` state if `>180s` (configurable), blocking execution until it recovers.
+- `warning_stale` when no authoritative position reconcile success for venue exceeds warning threshold.
+- `hard_stale` when it exceeds error threshold; this blocks buy execution until recovery.
+
+Order poll failures do not create a separate hard global gate; they impact exposure accuracy until next successful order reconcile.
+
+## Max Exposure Gate
+
+Exposure is computed per active market bucket:
+
+- `exposure_by_market.polymarket`
+- `exposure_by_market.kalshi`
+
+Per bucket:
+
+- `position_leg_exposure_usd = position_exposure_usd when present; else abs(net_contracts) * resolved_entry_price`
+- `resolved_entry_price = avg_entry_price when valid; else 1.0 (conservative max payout fallback)`
+- `gross_position_exposure_usd = sum(position_leg_exposure_usd)`
+- `gross_open_order_exposure_usd = sum(open_buy_remaining_size * limit_price)`
+- `gross_total_exposure_usd = gross_position + gross_open_order`
+
+If `gross_total_exposure_usd > max_exposure_per_market_usd`, that market bucket sets `buy_blocked=true`.
+
+Execution plan gating blocks all buy legs whenever one or more market buckets are blocked.
+Candidate-order projection is not included.
 
 ## Config and CLI Control
 
-### `config/run_config.json` (Position section)
+### `position_monitoring` config keys
 
-The `position_monitoring` config dictionary contains:
+- `enabled`
+- `require_bootstrap_before_buy`
+- `polymarket_user_ws_enabled`
+- `kalshi_market_positions_ws_enabled`
+- `kalshi_user_orders_ws_enabled`
+- `polymarket_poll_seconds`
+- `kalshi_poll_seconds`
+- `polymarket_orders_poll_seconds`
+- `kalshi_orders_poll_seconds`
+- `loop_sleep_seconds`
+- `drift_tolerance_contracts`
+- `max_exposure_per_market_usd`
+- `include_pending_orders_in_exposure`
+- `stale_warning_seconds`
+- `stale_error_seconds`
 
-- `enabled` (bool)
-- `polymarket_user_ws_enabled` (bool)
-- `kalshi_market_positions_ws_enabled` (bool)
-- `polymarket_poll_seconds` (int)
-- `kalshi_poll_seconds` (int)
-- `drift_tolerance_contracts` (float)
-- `stale_warning_seconds` (int)
-- `stale_error_seconds` (int)
-- `require_bootstrap_before_buy` (bool, default true)
+### Relevant CLI overrides
 
-### Logging Outputs
+- `--enable-position-monitoring`
+- `--polymarket-user-ws-enabled/--no-polymarket-user-ws-enabled`
+- `--kalshi-market-positions-ws-enabled/--no-kalshi-market-positions-ws-enabled`
+- `--kalshi-user-orders-ws-enabled/--no-kalshi-user-orders-ws-enabled`
+- `--position-polymarket-poll-seconds`
+- `--position-kalshi-poll-seconds`
+- `--position-polymarket-orders-poll-seconds`
+- `--position-kalshi-orders-poll-seconds`
 
-`run_core_loop` optionally writes out periodic `PositionRuntime.snapshot()` state to `data/` if the correct CLI flags are provided (e.g. `--log-positions`), allowing observability of open positions, pending orders, error counts, and drift metrics across the full engine lifecycle.
+## Logging Outputs
+
+With `--log-positions`, runtime emits `data/position_monitoring_log__*.jsonl` including:
+
+- `kind=position_health_transition`
+- `kind=position_poll_snapshot` (now includes order poll/reconcile payloads)
+- `kind=position_polymarket_user_order`
+- `kind=position_kalshi_user_order`
+- `kind=position_kalshi_market_position`
+
+Each event includes the current `position_health` snapshot.
+
+With `--log-raw-events`, per-venue REST raw payload logs are also emitted:
+
+- `data/position_poll_raw_http_polymarket__*.jsonl`
+  - includes `result.snapshot.raw_http_body` (Polymarket `/positions` response body)
+- `data/position_poll_raw_http_kalshi__*.jsonl`
+  - includes `result.snapshot.raw_http_pages` (Kalshi paginated `/portfolio/positions` bodies)
 
 ## External References
 
 - Polymarket user channel: https://docs.polymarket.com/market-data/websocket/user-channel
-- Polymarket get current positions: https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user
+- Polymarket positions API: https://docs.polymarket.com/api-reference/core/get-current-positions-for-a-user
+- Polymarket user orders API: https://docs.polymarket.com/api-reference/trade/get-user-orders
 - Kalshi market positions websocket: https://docs.kalshi.com/websockets/market-positions
-- Kalshi get positions: https://docs.kalshi.com/api-reference/portfolio/get-positions
+- Kalshi user orders websocket: https://docs.kalshi.com/websockets/user-orders
+- Kalshi positions API: https://docs.kalshi.com/api-reference/portfolio/get-positions
+- Kalshi orders API: https://docs.kalshi.com/api-reference/orders/get-orders
