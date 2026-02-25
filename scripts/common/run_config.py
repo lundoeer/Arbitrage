@@ -71,6 +71,17 @@ class BuyDecisionConfig:
     min_size_per_leg_contracts: float = 0.0
     min_notional_per_leg_usd: float = 0.0
     best_ask_size_safety_factor: float = 0.5
+    market_emulation_slippage: float = 0.02
+
+
+@dataclass(frozen=True)
+class SellDecisionConfig:
+    min_gross_edge_threshold: float = 0.0
+    max_size_cap_per_leg: float = 0.0
+    min_size_per_leg_contracts: float = 0.0
+    min_notional_per_leg_usd: float = 0.0
+    best_bid_size_safety_factor: float = 1.0
+    market_emulation_slippage: float = 0.02
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,7 @@ class ExecutionDecisionConfig:
 @dataclass(frozen=True)
 class DecisionConfig:
     buy: BuyDecisionConfig
+    sell: SellDecisionConfig
     execution: ExecutionDecisionConfig
 
 
@@ -102,6 +114,13 @@ class BuyExecutionRuntimeConfig:
     enabled: bool = False
     cooldown_ms: int = 0
     max_attempts_per_run: int = 1
+    parallel_leg_timeout_ms: int = 4000
+    api_retry: BuyExecutionApiRetryConfig = field(default_factory=BuyExecutionApiRetryConfig)
+
+
+@dataclass(frozen=True)
+class SellExecutionRuntimeConfig:
+    enabled: bool = False
     parallel_leg_timeout_ms: int = 4000
     api_retry: BuyExecutionApiRetryConfig = field(default_factory=BuyExecutionApiRetryConfig)
 
@@ -163,6 +182,7 @@ def health_config_to_dict(config: WsHealthConfig) -> Dict[str, Any]:
 def load_decision_config_from_run_config(*, config_path: Path) -> DecisionConfig:
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     buy = _as_dict(payload.get("buy"))
+    sell = _as_dict(payload.get("sell"))
     execution = _as_dict(payload.get("execution"))
 
     min_price = _to_float_bounded(
@@ -215,6 +235,47 @@ def load_decision_config_from_run_config(*, config_path: Path) -> DecisionConfig
                 min_value=0.0,
                 max_value=1.0,
             ),
+            market_emulation_slippage=_to_float_bounded(
+                buy.get("market_emulation_slippage"),
+                default=0.02,
+                min_value=0.0,
+                max_value=1.0,
+            ),
+        ),
+        sell=SellDecisionConfig(
+            min_gross_edge_threshold=_to_float_bounded(
+                sell.get("min_gross_edge_threshold"),
+                default=0.0,
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            max_size_cap_per_leg=_to_float(
+                sell.get("max_size_cap_per_leg"),
+                default=0.0,
+                min_value=0.0,
+            ),
+            min_size_per_leg_contracts=_to_float(
+                sell.get("min_size_per_leg_contracts"),
+                default=0.0,
+                min_value=0.0,
+            ),
+            min_notional_per_leg_usd=_to_float(
+                sell.get("min_notional_per_leg_usd"),
+                default=0.0,
+                min_value=0.0,
+            ),
+            best_bid_size_safety_factor=_to_float_bounded(
+                sell.get("best_bid_size_safety_factor"),
+                default=1.0,
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            market_emulation_slippage=_to_float_bounded(
+                sell.get("market_emulation_slippage"),
+                default=0.02,
+                min_value=0.0,
+                max_value=1.0,
+            ),
         ),
         execution=ExecutionDecisionConfig(
             best_ask_and_bids_at_max=max_price,
@@ -247,6 +308,15 @@ def decision_config_to_dict(config: DecisionConfig) -> Dict[str, Any]:
             "min_size_per_leg_contracts": float(config.buy.min_size_per_leg_contracts),
             "min_notional_per_leg_usd": float(config.buy.min_notional_per_leg_usd),
             "best_ask_size_safety_factor": float(config.buy.best_ask_size_safety_factor),
+            "market_emulation_slippage": float(config.buy.market_emulation_slippage),
+        },
+        "sell": {
+            "min_gross_edge_threshold": float(config.sell.min_gross_edge_threshold),
+            "max_size_cap_per_leg": float(config.sell.max_size_cap_per_leg),
+            "min_size_per_leg_contracts": float(config.sell.min_size_per_leg_contracts),
+            "min_notional_per_leg_usd": float(config.sell.min_notional_per_leg_usd),
+            "best_bid_size_safety_factor": float(config.sell.best_bid_size_safety_factor),
+            "market_emulation_slippage": float(config.sell.market_emulation_slippage),
         },
         "execution": {
             "best_ask_and_bids_at_max": float(config.execution.best_ask_and_bids_at_max),
@@ -299,6 +369,50 @@ def buy_execution_runtime_config_to_dict(config: BuyExecutionRuntimeConfig) -> D
         "enabled": bool(config.enabled),
         "cooldown_ms": int(config.cooldown_ms),
         "max_attempts_per_run": int(config.max_attempts_per_run),
+        "parallel_leg_timeout_ms": int(config.parallel_leg_timeout_ms),
+        "api_retry": {
+            "enabled": bool(config.api_retry.enabled),
+            "max_attempts": int(config.api_retry.max_attempts),
+            "base_backoff_seconds": float(config.api_retry.base_backoff_seconds),
+            "jitter_ratio": float(config.api_retry.jitter_ratio),
+            "include_post": bool(config.api_retry.include_post),
+        },
+    }
+
+
+def load_sell_execution_runtime_config_from_run_config(*, config_path: Path) -> SellExecutionRuntimeConfig:
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    sell_execution = _as_dict(payload.get("sell_execution"))
+    api_retry = _as_dict(sell_execution.get("api_retry"))
+    return SellExecutionRuntimeConfig(
+        enabled=_to_bool(sell_execution.get("enabled"), default=False),
+        parallel_leg_timeout_ms=_to_int(
+            sell_execution.get("parallel_leg_timeout_ms"),
+            default=4000,
+            min_value=100,
+        ),
+        api_retry=BuyExecutionApiRetryConfig(
+            enabled=_to_bool(api_retry.get("enabled"), default=True),
+            max_attempts=_to_int(api_retry.get("max_attempts"), default=3, min_value=1),
+            base_backoff_seconds=_to_float(
+                api_retry.get("base_backoff_seconds"),
+                default=0.5,
+                min_value=0.0,
+            ),
+            jitter_ratio=_to_float_bounded(
+                api_retry.get("jitter_ratio"),
+                default=0.2,
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            include_post=_to_bool(api_retry.get("include_post"), default=True),
+        ),
+    )
+
+
+def sell_execution_runtime_config_to_dict(config: SellExecutionRuntimeConfig) -> Dict[str, Any]:
+    return {
+        "enabled": bool(config.enabled),
         "parallel_leg_timeout_ms": int(config.parallel_leg_timeout_ms),
         "api_retry": {
             "enabled": bool(config.api_retry.enabled),

@@ -15,17 +15,37 @@
   },
   "buy": {
     "min_gross_edge_threshold": 0.05,
-    "max_spend_per_market_usd": 20.0,
-    "max_size_cap_per_leg": 20.0,
+    "max_spend_per_market_usd": 12.0,
+    "max_size_cap_per_leg": 10.0,
     "min_size_per_leg_contracts": 5.0,
-    "min_notional_per_leg_usd": 2.0,
-    "best_ask_size_safety_factor": 0.5
+    "min_notional_per_leg_usd": 0.0,
+    "best_ask_size_safety_factor": 0.5,
+    "market_emulation_slippage": 0.1
+  },
+  "sell": {
+    "min_gross_edge_threshold": 0.02,
+    "max_size_cap_per_leg": 10.0,
+    "min_size_per_leg_contracts": 5.0,
+    "min_notional_per_leg_usd": 0.0,
+    "best_bid_size_safety_factor": 0.5,
+    "market_emulation_slippage": 0.1
   },
   "buy_execution": {
     "enabled": true,
     "cooldown_ms": 17000,
-    "max_attempts_per_run": 3,
-    "parallel_leg_timeout_ms": 4000,
+    "max_attempts_per_run": 100,
+    "parallel_leg_timeout_ms": 10000,
+    "api_retry": {
+      "enabled": true,
+      "max_attempts": 3,
+      "base_backoff_seconds": 0.5,
+      "jitter_ratio": 0.2,
+      "include_post": true
+    }
+  },
+  "sell_execution": {
+    "enabled": false,
+    "parallel_leg_timeout_ms": 10000,
     "api_retry": {
       "enabled": true,
       "max_attempts": 3,
@@ -52,8 +72,8 @@
     "stale_error_seconds": 60
   },
   "execution": {
-    "best_ask_and_bids_at_max": 0.88,
-    "best_ask_and_bids_at_min": 0.12,
+    "best_ask_and_bids_at_max": 0.89,
+    "best_ask_and_bids_at_min": 0.11,
     "market_start_trade_time_seconds": 60,
     "market_end_trade_time_seconds": 120
   }

@@ -19,6 +19,7 @@ from scripts.common.position_polling import (
     PositionPollClientConfig,
 )
 from scripts.common.run_config import BuyExecutionRuntimeConfig
+from scripts.common.run_config import SellExecutionRuntimeConfig
 from scripts.common.ws_collectors import (
     KalshiMarketPositionsWsCollector,
     KalshiUserOrdersWsCollector,
@@ -31,6 +32,23 @@ from scripts.common.ws_transport import NullWriter, WsHealthConfig
 
 def build_buy_execution_transport(*, buy_execution_config: BuyExecutionRuntimeConfig) -> ApiTransport:
     api_retry = buy_execution_config.api_retry
+    if not bool(api_retry.enabled):
+        return ApiTransport(timeout_seconds=10)
+
+    methods = {"GET", "HEAD", "OPTIONS"}
+    if bool(api_retry.include_post):
+        methods.add("POST")
+    retry_config = RetryConfig(
+        max_attempts=max(1, int(api_retry.max_attempts)),
+        base_backoff_seconds=max(0.0, float(api_retry.base_backoff_seconds)),
+        jitter_ratio=max(0.0, float(api_retry.jitter_ratio)),
+        retry_methods=frozenset(methods),
+    )
+    return ApiTransport(timeout_seconds=10, retry_config=retry_config)
+
+
+def build_sell_execution_transport(*, sell_execution_config: SellExecutionRuntimeConfig) -> ApiTransport:
+    api_retry = sell_execution_config.api_retry
     if not bool(api_retry.enabled):
         return ApiTransport(timeout_seconds=10)
 
@@ -72,6 +90,35 @@ def build_buy_execution_clients(
     enabled = polymarket_client is not None and kalshi_client is not None and not errors
     if not enabled and not errors:
         errors.append("buy_clients_not_available")
+    return enabled, BuyExecutionClients(polymarket=polymarket_client, kalshi=kalshi_client), errors
+
+
+def build_sell_execution_clients(
+    *,
+    enable_sell_execution: bool,
+    sell_execution_config: SellExecutionRuntimeConfig,
+) -> tuple[bool, BuyExecutionClients, list[str]]:
+    if not bool(enable_sell_execution):
+        return False, BuyExecutionClients(), []
+
+    errors: list[str] = []
+    polymarket_client = None
+    kalshi_client = None
+    transport = build_sell_execution_transport(sell_execution_config=sell_execution_config)
+    try:
+        polymarket_client = build_polymarket_api_buy_client_from_env(
+            transport=transport,
+        )
+    except Exception as exc:
+        errors.append(f"polymarket_client_init_failed:{type(exc).__name__}:{exc}")
+    try:
+        kalshi_client = KalshiApiBuyClient(transport=transport)
+    except Exception as exc:
+        errors.append(f"kalshi_client_init_failed:{type(exc).__name__}:{exc}")
+
+    enabled = polymarket_client is not None and kalshi_client is not None and not errors
+    if not enabled and not errors:
+        errors.append("sell_clients_not_available")
     return enabled, BuyExecutionClients(polymarket=polymarket_client, kalshi=kalshi_client), errors
 
 

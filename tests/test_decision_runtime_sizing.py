@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, Tuple
 
 from scripts.common.decision_runtime import _build_execution_plan
-from scripts.common.run_config import BuyDecisionConfig, DecisionConfig, ExecutionDecisionConfig
+from scripts.common.run_config import BuyDecisionConfig, DecisionConfig, ExecutionDecisionConfig, SellDecisionConfig
 
 
 def _market_context() -> Dict[str, Any]:
@@ -61,11 +61,13 @@ def _decision_config(**buy_overrides: Any) -> DecisionConfig:
         "min_size_per_leg_contracts": 0.0,
         "min_notional_per_leg_usd": 0.0,
         "best_ask_size_safety_factor": 0.5,
+        "market_emulation_slippage": 0.02,
         **buy_overrides,
     }
     buy = BuyDecisionConfig(**buy_payload)
     return DecisionConfig(
         buy=buy,
+        sell=SellDecisionConfig(),
         execution=ExecutionDecisionConfig(),
     )
 
@@ -221,7 +223,22 @@ def test_policy_contains_detailed_sizing_fields() -> None:
     policy = plan["policy"]
     assert policy["sizing_mode"] == "top_of_book_budget_caps_with_min_thresholds"
     assert policy["best_ask_size_safety_factor"] == 0.5
+    assert policy["market_emulation_slippage"] == 0.02
     assert "computed_caps" in policy
     assert "inputs" in policy
     assert "final_leg_notional_usd" in policy
     assert policy["size_rounding"] == "floor_to_whole_contract"
+
+
+def test_buy_market_emulation_slippage_is_configurable() -> None:
+    plan_default, reasons_default = _build(cfg=_decision_config(market_emulation_slippage=0.02))
+    plan_custom, reasons_custom = _build(cfg=_decision_config(market_emulation_slippage=0.05))
+    assert reasons_default == []
+    assert reasons_custom == []
+    assert plan_default is not None
+    assert plan_custom is not None
+    default_limit = float(plan_default["legs"][0]["limit_price"])
+    custom_limit = float(plan_custom["legs"][0]["limit_price"])
+    assert default_limit == 0.42
+    assert custom_limit == 0.45
+    assert plan_custom["legs"][0]["metadata"]["market_emulation_slippage"] == 0.05

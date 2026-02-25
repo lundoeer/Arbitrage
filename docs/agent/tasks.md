@@ -36,21 +36,41 @@ How this file is structured:
 - [x] #30 - Parallelized buy leg submits inside `execute_cross_venue_buy` with per-leg timeout + timing fields + tests.
 - [x] #22 - Implemented buy sizing with top-of-book liquidity cap, safety factor, and configurable minimum contracts/notional thresholds.
 
-## Now
+- [x] #27_a -Design states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated by authoratative api calls before the next order is placed. Maybe the current FSM is already handeling this otherwise consider if this is new or a change to FSM where does this belong? Maybe it is logic to go from Awaiting_result to cooldown currently it just auto moves as far as i can see.
 
-- None
+- [x] #27_b -Implement states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed.
+
+- [x] #24 -Implement selling positions based on bids - this should also check size but have its own thresholds and such and the size is limited to current positions, and it is checking bid sizes not ask like buying i think. I would like this to mirror and reuse the implementations from buying as much as possible. I am thinking they are very similar. the main difference is determining sizing, I am unsure how different the order types are in selling for the venues. If these are very different this would cause more changes
+- [x] #36 - Implement market_emulation_slippage config for buying. to replace the current hardcoded value.
+- [x] #35 - Implement get trades today and yesterday, with optional flag for other period. The script should create or update a file in logs/trade_log. I am a little unsure which fields should be in the file. I imainge getting this from:
+
+      https://docs.polymarket.com/api-reference/trade/get-trades - individual trades
+      https://docs.polymarket.com/api-reference/core/get-closed-positions-for-a-user end of market
+      https://docs.kalshi.com/api-reference/portfolio/get-settlements end of market
+      https://docs.kalshi.com/api-reference/portfolio/get-fills individual trades
+
+I would like this sorted by time, and I imagine something like this
+trades pr. market pair with these fields
+time, market, action (side in polymaket), size, price (for kalshi this depends on kalshi side), fee, outcome, outcomeIndex
+
+at the end of each market pair there is a line with outcome for each venue, with these fields
+market, size, total cost, fee, outcome, revenue.
+
+I would like runs to add new lines to the log if there are additional lines. there are some differences between kalshi and polymarket but just ask if you have any doubts after reading the documentation from kalshi and polymarket.
+
+## Now
 
 ## Next
 
-- [ ] #27_a -Design states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed. Maybe the current FSM is already handeling this otherwise consider if this is new or a change to FSM where does this belong? Maybe it is logic to go from Awaiting_result to cooldown currently it just auto moves as far as i can see.
-- [ ] #27_b -Implement states for what is open: {buying, selling, hedging}, remember only one order per market at a time. orders must be resolved before and resulting positions updated before a order is placed.
-- [ ] #24 -Implement selling positions based on bids - this should also check size but have its own thresholds and it is checking bid sizes not ask like buying
-- [ ] #26 -Implement hedging based on positions and a check for unfilled orders. Hedging is one-leg selling to avoid unbalanced positions
-- [ ] #33 - Implement market surveillance - target price on market start and through chainlink - and regular current price surveillance
-      -[] #32 remove fallbacks from tests so the fail when they are meant to
+- [ ] #33 - Implement market surveillance - target price on market start and through chainlink - and regular current price surveillance. It should be evenly spread between target and price differences. investigate this also
+- [ ] #36 - always log failed order and their responses.
+
+- [ ] #34 unify locks for sell/hedge and buy
+- [ ] #32 remove fallbacks from tests so the fail when they are meant to
 
 ## Later
 
+- [ ] #26 -Implement hedging based on positions and a check for unfilled orders. Hedging is one-leg selling to avoid unbalanced positions
 - [ ] #9 — Lag timestamp precision detection (`Improve_lag.md` #1 + #6) — 1 hr
 - [ ] #10 — Rolling lag stats in health snapshots (`Improve_lag.md` #3) — 1 hr, depends on #9
 - [ ] #11 — Partial-submit alert (stderr on `partially_submitted`) — 10 min

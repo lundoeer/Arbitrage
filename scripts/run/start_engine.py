@@ -38,10 +38,12 @@ from scripts.common.run_config import (
     load_decision_config_from_run_config,
     load_health_config_from_run_config,
     load_position_monitoring_runtime_config_from_run_config,
+    load_sell_execution_runtime_config_from_run_config,
     health_config_to_dict,
     decision_config_to_dict,
     buy_execution_runtime_config_to_dict,
     position_monitoring_runtime_config_to_dict,
+    sell_execution_runtime_config_to_dict,
 )
 from scripts.common.ws_collectors import KalshiWsCollector, PolymarketWsCollector
 from scripts.common.ws_transport import NullWriter, JsonlWriter, now_ms
@@ -79,6 +81,7 @@ def main() -> None:
     health_config = load_health_config_from_run_config(config_path=config_path)
     decision_config = load_decision_config_from_run_config(config_path=config_path)
     buy_execution_config = load_buy_execution_runtime_config_from_run_config(config_path=config_path)
+    sell_execution_config = load_sell_execution_runtime_config_from_run_config(config_path=config_path)
     position_monitoring_config = load_position_monitoring_runtime_config_from_run_config(config_path=config_path)
 
     buy_execution_requested = (
@@ -97,6 +100,8 @@ def main() -> None:
         else max(0, int(buy_execution_config.max_attempts_per_run))
     )
     buy_execution_parallel_leg_timeout_ms = max(100, int(buy_execution_config.parallel_leg_timeout_ms))
+    sell_execution_requested = bool(sell_execution_config.enabled)
+    sell_execution_parallel_leg_timeout_ms = max(100, int(sell_execution_config.parallel_leg_timeout_ms))
 
     position_monitoring_requested = (
         bool(args.enable_position_monitoring)
@@ -155,6 +160,8 @@ def main() -> None:
 
     if buy_execution_requested:
         print("Buy execution requested; clients will initialize per discovered market segment.")
+    if sell_execution_requested:
+        print("Sell execution requested; clients will initialize per discovered market segment.")
     if position_monitoring_requested:
         print("Position monitoring requested; adapters will initialize per discovered market segment.")
     if account_snapshot_logging_enabled:
@@ -181,14 +188,17 @@ def main() -> None:
         health_config=health_config,
         decision_config=decision_config,
         buy_execution_config=buy_execution_config,
+        sell_execution_config=sell_execution_config,
         position_monitoring_config=position_monitoring_config,
         position_reconcile_config=position_reconcile_config,
         buy_execution_requested=buy_execution_requested,
+        sell_execution_requested=sell_execution_requested,
         position_monitoring_requested=position_monitoring_requested,
         account_snapshot_logging_enabled=account_snapshot_logging_enabled,
         buy_execution_cooldown_ms=buy_execution_cooldown_ms,
         buy_execution_max_attempts=buy_execution_max_attempts,
         buy_execution_parallel_leg_timeout_ms=buy_execution_parallel_leg_timeout_ms,
+        sell_execution_parallel_leg_timeout_ms=sell_execution_parallel_leg_timeout_ms,
         polymarket_user_ws_enabled=polymarket_user_ws_enabled,
         kalshi_market_positions_ws_enabled=kalshi_market_positions_ws_enabled,
         kalshi_user_orders_ws_enabled=kalshi_user_orders_ws_enabled,

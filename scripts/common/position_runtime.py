@@ -276,9 +276,86 @@ class PositionRuntime:
                     }
                 )
 
+        # Explicit sell-side safeguard: do not allow sell submission when local
+        # tracked position is below requested sell size.
+        for index, raw_leg in enumerate(legs):
+            leg = as_dict(raw_leg)
+            action = str(leg.get("action") or "").strip().lower()
+            if action != "sell":
+                continue
+            venue = str(leg.get("venue") or "").strip().lower()
+            instrument_id = as_non_empty_text(leg.get("instrument_id"))
+            outcome_side = str(leg.get("side") or "").strip().lower()
+            size = as_float(leg.get("size"))
+            market_key = self._market_key_from_venue(venue)
+            if market_key is None:
+                blocked_legs.append(
+                    {
+                        "index": int(index),
+                        "venue": None,
+                        "side": outcome_side or None,
+                        "instrument_id": instrument_id,
+                        "action": "sell",
+                        "reason": "invalid_venue_for_sell_leg",
+                    }
+                )
+                continue
+            if instrument_id is None or outcome_side not in {"yes", "no"}:
+                blocked_legs.append(
+                    {
+                        "index": int(index),
+                        "venue": market_key,
+                        "side": outcome_side or None,
+                        "instrument_id": instrument_id,
+                        "action": "sell",
+                        "reason": "missing_or_invalid_sell_leg_identity",
+                    }
+                )
+                continue
+            if size is None or float(size) <= 0.0:
+                blocked_legs.append(
+                    {
+                        "index": int(index),
+                        "venue": market_key,
+                        "side": outcome_side,
+                        "instrument_id": instrument_id,
+                        "action": "sell",
+                        "reason": "missing_or_invalid_sell_leg_size",
+                    }
+                )
+                continue
+            pos_key = _position_key(
+                venue=market_key,
+                instrument_id=instrument_id,
+                outcome_side=outcome_side,
+            )
+            rec = self.positions_by_key.get(pos_key)
+            available = max(0.0, float(rec.net_contracts)) if rec is not None else 0.0
+            required = float(size)
+            if available + 1e-9 < required:
+                blocked_legs.append(
+                    {
+                        "index": int(index),
+                        "venue": market_key,
+                        "side": outcome_side,
+                        "instrument_id": instrument_id,
+                        "action": "sell",
+                        "reason": "insufficient_available_position_for_sell",
+                        "available_contracts": round(float(available), 6),
+                        "required_contracts": round(float(required), 6),
+                    }
+                )
+                if market_key not in blocked_markets:
+                    blocked_markets.append(market_key)
+
         reasons: List[str] = []
         if blocked_legs:
-            reasons.append("max_exposure_per_market_exceeded")
+            if any(str(item.get("action") or "").strip().lower() == "buy" for item in blocked_legs):
+                reasons.append("max_exposure_per_market_exceeded")
+            if any(str(item.get("action") or "").strip().lower() == "sell" for item in blocked_legs):
+                reasons.append("insufficient_available_position_for_sell")
+        # Keep deterministic output order for logs/tests.
+        blocked_markets = sorted(set(str(m) for m in blocked_markets))
         return {
             "allowed": not bool(blocked_legs),
             "reasons": reasons,
@@ -658,6 +735,27 @@ class PositionRuntime:
             return bool((float(requested) - float(filled)) > 1e-9)
         return True
 
+    def has_open_orders_for_venue(self, venue: str) -> bool:
+        venue_norm = str(venue or "").strip().lower()
+        if venue_norm not in {"polymarket", "kalshi"}:
+            return False
+        for rec in self.orders_by_client_order_id.values():
+            if str(rec.venue).strip().lower() != venue_norm:
+                continue
+            if self._is_open_order(rec):
+                return True
+        return False
+
+    def open_order_counts_by_venue(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {"polymarket": 0, "kalshi": 0}
+        for rec in self.orders_by_client_order_id.values():
+            venue_norm = self._market_key_from_venue(rec.venue)
+            if venue_norm is None:
+                continue
+            if self._is_open_order(rec):
+                counts[venue_norm] = int(counts.get(venue_norm, 0) + 1)
+        return counts
+
     def _position_gross_exposure_by_market_usd(self) -> Dict[str, float]:
         gross_by_market: Dict[str, float] = {
             "polymarket": 0.0,
@@ -802,16 +900,21 @@ class PositionRuntime:
         outcome_side: str,
         filled_contracts: float,
         fill_price: Optional[float] = None,
+        action: Optional[str] = None,
         now_epoch_ms: Optional[int] = None,
     ) -> bool:
         size = as_float(filled_contracts)
         if size is None or size <= 0:
             return False
+        action_norm = str(action or "").strip().lower()
+        delta = float(size)
+        if action_norm == "sell":
+            delta = float(-delta)
         applied = self._apply_delta(
             venue="polymarket",
             instrument_id=instrument_id,
             outcome_side=outcome_side,
-            delta_contracts=float(size),
+            delta_contracts=delta,
             fill_price=fill_price,
             source="user_ws_confirmed_trade",
             authoritative=False,
@@ -930,7 +1033,7 @@ class PositionRuntime:
             self._refresh_health(now_epoch_ms=ts)
         return bool(applied)
 
-    def apply_buy_execution_result(self, *, result_payload: Dict[str, Any], now_epoch_ms: Optional[int] = None) -> int:
+    def apply_execution_result(self, *, result_payload: Dict[str, Any], now_epoch_ms: Optional[int] = None) -> int:
         ts = int(now_epoch_ms if now_epoch_ms is not None else now_ms())
         payload = as_dict(result_payload)
         signal_id = as_non_empty_text(payload.get("signal_id")) or ""
@@ -990,11 +1093,14 @@ class PositionRuntime:
             # Apply only if venue explicitly returns filled size in submit response.
             if submitted and filled is not None and filled > 0 and _is_valid_venue(venue):
                 fill_price = self._extract_fill_price(response_payload)
+                delta_contracts = float(filled)
+                if action_norm == "sell":
+                    delta_contracts = float(-delta_contracts)
                 self._apply_delta(
                     venue=venue,
                     instrument_id=instrument_id,
                     outcome_side=side,
-                    delta_contracts=float(filled),
+                    delta_contracts=delta_contracts,
                     fill_price=fill_price,
                     source="submit_ack_with_fill",
                     authoritative=False,
@@ -1004,6 +1110,10 @@ class PositionRuntime:
 
         self._refresh_health(now_epoch_ms=ts)
         return accepted
+
+    def apply_buy_execution_result(self, *, result_payload: Dict[str, Any], now_epoch_ms: Optional[int] = None) -> int:
+        # Backward-compatible wrapper while callsites migrate to action-aware naming.
+        return self.apply_execution_result(result_payload=result_payload, now_epoch_ms=now_epoch_ms)
 
     def reconcile_orders_snapshot(
         self,

@@ -27,6 +27,7 @@ This hybrid model keeps fast streaming behavior while continuously correcting to
 6. Order-state reconciliation affects exposure/order accounting only; it is not a separate hard global gate.
 7. Order merge precedence is fixed: `submit_ack < websocket < REST poll snapshot`.
 8. Closed orders are removed immediately from runtime (history lives in logs).
+9. Global execution lock unlock uses positions poll success timestamps for required venues.
 
 ## Source Roles and Trust
 
@@ -67,6 +68,7 @@ This hybrid model keeps fast streaming behavior while continuously correcting to
   - wiring callbacks, collectors, runtime, and reconcile loop
 - `scripts/run/engine_loop.py`
   - runs polling loop task + logging integration
+  - forwards successful positions poll events to execution lock runtime
 
 ## Canonical Runtime Model
 
@@ -165,6 +167,11 @@ Before active buy execution in a segment:
 2. orders poll bootstrap (both venues)
 3. runtime health/exposure initialized from current snapshots
 
+Execution-lock integration:
+
+1. After execution result, lock runtime requires per-venue positions poll success at/after execution completion timestamp.
+2. `_position_poll_loop` feeds each successful venue poll to lock runtime (`mark_positions_reconcile_success`).
+
 ### Staleness thresholds
 
 - `warning_stale` when no authoritative position reconcile success for venue exceeds warning threshold.
@@ -232,6 +239,7 @@ With `--log-positions`, runtime emits `data/position_monitoring_log__*.jsonl` in
 - `kind=position_polymarket_user_order`
 - `kind=position_kalshi_user_order`
 - `kind=position_kalshi_market_position`
+- `kind=position_execution_lock_transition`
 
 Each event includes the current `position_health` snapshot.
 

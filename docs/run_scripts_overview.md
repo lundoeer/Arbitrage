@@ -1,6 +1,6 @@
 # Run Scripts Overview
 
-Last updated: 2026-02-23
+Last updated: 2026-02-24
 
 ## Purpose
 
@@ -96,19 +96,22 @@ The engine needs to do several things at once within a segment:
 Each `_decision_loop` tick does:
 
 1. `buy_fsm.maybe_rearm(...)`
-2. refresh position health (if enabled)
-3. fetch websocket health snapshots
-4. fetch runtime quotes
-5. call `DecisionRuntime.evaluate(...)`
-6. if `can_trade` is true, enforce execution safeguards in order:
+2. refresh execution-lock terminal status from position runtime open orders (if enabled)
+3. refresh position health (if enabled)
+4. fetch websocket health snapshots
+5. fetch runtime quotes
+6. call `DecisionRuntime.evaluate(...)`
+7. if `can_trade` is true, enforce execution safeguards in order:
    - max attempts
    - execution enabled
+   - execution-lock prerequisites (position runtime + reconcile loop present)
    - position health gate
+   - execution lock gate
    - FSM gate
    - execution plan/signal id presence
-7. execute buy path and update counters/FSM snapshots
-8. write decision/buy-execution logs
-9. sleep until next decision tick
+8. execute buy path and update counters/FSM/lock snapshots
+9. write decision/buy-execution logs
+10. sleep until next decision tick
 
 ## Testing and Argparse Boundary
 

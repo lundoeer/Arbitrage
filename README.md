@@ -104,6 +104,31 @@ Engine outputs (in `data/`):
 
 Polymarket `custom_feature_enabled=true` is on by default. Use `--no-custom-feature-enabled` to disable.
 
+### Trade Log Diagnostic
+
+```powershell
+.venv\Scripts\python.exe -m scripts.diagnostic.log_trades
+```
+
+Flags for `scripts.diagnostic.log_trades`:
+
+- `--output` (default: `logs/trade_log/trades.jsonl`)
+- `--period` (default: `today,yesterday`; allowed: `today,yesterday,last_24h,last_48h,last_7d`)
+- `--after` (default: empty; ISO-8601 or unix seconds/ms)
+- `--before` (default: empty; ISO-8601 or unix seconds/ms)
+- `--timezone` (default: `America/New_York`)
+- `--limit` (default: `200`)
+- `--max-pages` (default: `200`)
+- `--polymarket-base-url` (default: `https://clob.polymarket.com`)
+- `--polymarket-data-api-base-url` (default: `https://data-api.polymarket.com`)
+- `--polymarket-maker-address` (default: empty)
+- `--polymarket-user-address` (default: empty)
+- `--polymarket-market` (default: empty; optional `condition_id` filter)
+- `--kalshi-base-host` (default: `https://api.elections.kalshi.com`)
+- `--kalshi-api-prefix` (default: `/trade-api/v2`)
+- `--kalshi-ticker` (default: empty)
+- `--kalshi-subaccount` (default: `None`)
+
 ## .env Variables
 
 ```
@@ -120,7 +145,7 @@ POLYMARKET_FUNDER=
 
 ## Documentation
 
-- `docs/buying.md` — Buy execution design (FSM, execution flow)
+- `docs/trading.md` — Trading execution design (buy/sell flow, safeguards, lock behavior)
 - `docs/websocket.md` — WebSocket implementation details
 - `docs/Improve_lag.md` — Health metric accuracy improvements
 - `docs\position_monitoring.md`

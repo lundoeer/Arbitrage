@@ -53,6 +53,41 @@ def test_apply_buy_execution_result_merges_submit_acks_without_fill_change() -> 
     assert runtime.position(venue="kalshi", instrument_id="KXBTC15M-TEST", outcome_side="no")["net_contracts"] == 0.0
 
 
+def test_apply_execution_result_sell_fill_reduces_position() -> None:
+    runtime = _runtime()
+    payload = {
+        "signal_id": "sig-sell-1",
+        "status": "submitted",
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "instrument_id": "pm_yes_token",
+                "client_order_id": "cid-pm-sell-1",
+                "request_payload": {
+                    "action": "sell",
+                    "size": 2.0,
+                    "limit_price": 0.65,
+                },
+                "response_payload": {
+                    "response": {
+                        "order": {
+                            "status": "filled",
+                            "filled_size": "2.0",
+                            "remaining_size": "0.0",
+                        }
+                    }
+                },
+                "submitted": True,
+                "error": None,
+            },
+        ],
+    }
+    accepted = runtime.apply_execution_result(result_payload=payload, now_epoch_ms=1_600)
+    assert accepted == 1
+    assert runtime.position(venue="polymarket", instrument_id="pm_yes_token", outcome_side="yes")["net_contracts"] == -2.0
+
+
 def test_polymarket_confirmed_fill_is_deduped_by_event_id() -> None:
     runtime = _runtime()
 
@@ -404,6 +439,7 @@ def test_evaluate_execution_plan_blocks_all_buy_legs_when_any_market_exceeded() 
                 "side": "yes",
                 "action": "sell",
                 "instrument_id": "pm_yes_token",
+                "size": 1.0,
             },
             {
                 "venue": "kalshi",
@@ -427,19 +463,126 @@ def test_evaluate_execution_plan_blocks_all_buy_legs_when_any_market_exceeded() 
                 "side": "yes",
                 "action": "sell",
                 "instrument_id": "pm_yes_token",
+                "size": 1.0,
             },
             {
                 "venue": "kalshi",
                 "side": "no",
                 "action": "sell",
                 "instrument_id": "KXBTC15M-TEST",
+                "size": 1.0,
             },
         ]
     }
     sell_only_gate = runtime.evaluate_execution_plan(execution_plan=sell_only_plan, now_epoch_ms=1_200)
-    assert sell_only_gate["allowed"] is True
-    assert sell_only_gate["blocked_markets"] == ["polymarket"]
-    assert sell_only_gate["blocked_legs"] == []
+    assert sell_only_gate["allowed"] is False
+    assert sell_only_gate["blocked_markets"] == ["kalshi", "polymarket"]
+    assert len(sell_only_gate["blocked_legs"]) == 1
+    assert sell_only_gate["blocked_legs"][0]["venue"] == "kalshi"
+    assert sell_only_gate["blocked_legs"][0]["action"] == "sell"
+    assert sell_only_gate["blocked_legs"][0]["reason"] == "insufficient_available_position_for_sell"
+
+
+def test_evaluate_execution_plan_blocks_sell_when_available_position_is_insufficient() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=0.0,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+    runtime.reconcile_positions_snapshot(
+        venue="polymarket",
+        positions=[
+            {"instrument_id": "pm_yes_token", "outcome_side": "yes", "net_contracts": 1.0},
+            {"instrument_id": "pm_no_token", "outcome_side": "no", "net_contracts": 0.0},
+        ],
+        snapshot_id="sell-pos-pm-1",
+        now_epoch_ms=1_050,
+    )
+    runtime.reconcile_positions_snapshot(
+        venue="kalshi",
+        positions=[
+            {"instrument_id": "KXBTC15M-TEST", "outcome_side": "yes", "net_contracts": 0.0},
+            {"instrument_id": "KXBTC15M-TEST", "outcome_side": "no", "net_contracts": 0.0},
+        ],
+        snapshot_id="sell-pos-kx-1",
+        now_epoch_ms=1_050,
+    )
+    plan = {
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "action": "sell",
+                "instrument_id": "pm_yes_token",
+                "size": 2.0,
+            },
+            {
+                "venue": "kalshi",
+                "side": "no",
+                "action": "sell",
+                "instrument_id": "KXBTC15M-TEST",
+                "size": 1.0,
+            },
+        ]
+    }
+    gate = runtime.evaluate_execution_plan(execution_plan=plan, now_epoch_ms=1_100)
+    assert gate["allowed"] is False
+    assert "insufficient_available_position_for_sell" in gate["reasons"]
+    sell_blocks = [item for item in gate["blocked_legs"] if item.get("action") == "sell"]
+    assert len(sell_blocks) == 2
+
+
+def test_evaluate_execution_plan_allows_sell_when_available_position_is_sufficient() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            max_exposure_per_market_usd=0.0,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+    runtime.reconcile_positions_snapshot(
+        venue="polymarket",
+        positions=[
+            {"instrument_id": "pm_yes_token", "outcome_side": "yes", "net_contracts": 3.0},
+            {"instrument_id": "pm_no_token", "outcome_side": "no", "net_contracts": 0.0},
+        ],
+        snapshot_id="sell-pos-pm-2",
+        now_epoch_ms=1_050,
+    )
+    runtime.reconcile_positions_snapshot(
+        venue="kalshi",
+        positions=[
+            {"instrument_id": "KXBTC15M-TEST", "outcome_side": "yes", "net_contracts": 0.0},
+            {"instrument_id": "KXBTC15M-TEST", "outcome_side": "no", "net_contracts": 2.0},
+        ],
+        snapshot_id="sell-pos-kx-2",
+        now_epoch_ms=1_050,
+    )
+    plan = {
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "action": "sell",
+                "instrument_id": "pm_yes_token",
+                "size": 2.0,
+            },
+            {
+                "venue": "kalshi",
+                "side": "no",
+                "action": "sell",
+                "instrument_id": "KXBTC15M-TEST",
+                "size": 1.0,
+            },
+        ]
+    }
+    gate = runtime.evaluate_execution_plan(execution_plan=plan, now_epoch_ms=1_100)
+    assert gate["allowed"] is True
+    assert gate["blocked_legs"] == []
 
 
 def test_order_lifecycle_ws_and_poll_remove_closed_orders_immediately() -> None:
@@ -544,3 +687,88 @@ def test_order_lifecycle_ws_and_poll_remove_closed_orders_immediately() -> None:
     )
     assert reconcile["applied"] == 1
     assert runtime.orders_by_client_order_id.get("cid-life-1") is None
+
+
+def test_open_order_helper_by_venue_tracks_terminal_vs_open() -> None:
+    runtime = _runtime(
+        config=PositionRuntimeConfig(
+            require_bootstrap_before_buy=False,
+            include_pending_orders_in_exposure=True,
+        ),
+        now_epoch_ms=1_000,
+    )
+
+    open_payload = {
+        "signal_id": "sig-open-helper-1",
+        "status": "submitted",
+        "legs": [
+            {
+                "venue": "polymarket",
+                "side": "yes",
+                "instrument_id": "pm_yes_token",
+                "client_order_id": "cid-open-helper-pm",
+                "request_payload": {
+                    "action": "buy",
+                    "size": 5.0,
+                    "limit_price": 0.51,
+                },
+                "response_payload": {
+                    "response": {
+                        "order": {
+                            "status": "open",
+                            "remaining_size": "5.0",
+                        }
+                    }
+                },
+                "submitted": True,
+                "error": None,
+            },
+            {
+                "venue": "kalshi",
+                "side": "no",
+                "instrument_id": "KXBTC15M-TEST",
+                "client_order_id": "cid-open-helper-kx",
+                "request_payload": {
+                    "action": "buy",
+                    "size": 4.0,
+                    "limit_price": 0.49,
+                },
+                "response_payload": {
+                    "response": {
+                        "order": {
+                            "status": "filled",
+                            "remaining_count_fp": "0.0",
+                        }
+                    }
+                },
+                "submitted": True,
+                "error": None,
+            },
+        ],
+    }
+    runtime.apply_buy_execution_result(result_payload=open_payload, now_epoch_ms=1_100)
+
+    assert runtime.has_open_orders_for_venue("polymarket") is True
+    assert runtime.has_open_orders_for_venue("kalshi") is False
+    assert runtime.open_order_counts_by_venue() == {"polymarket": 1, "kalshi": 0}
+
+    runtime.reconcile_orders_snapshot(
+        venue="polymarket",
+        orders=[
+            {
+                "client_order_id": "cid-open-helper-pm",
+                "instrument_id": "pm_yes_token",
+                "outcome_side": "yes",
+                "action": "buy",
+                "status": "filled",
+                "requested_size": 5.0,
+                "filled_size": 5.0,
+                "remaining_size": 0.0,
+                "limit_price": 0.51,
+            }
+        ],
+        snapshot_id="poll-close-pm-open-helper",
+        now_epoch_ms=1_200,
+    )
+    assert runtime.has_open_orders_for_venue("polymarket") is False
+    assert runtime.open_order_counts_by_venue() == {"polymarket": 0, "kalshi": 0}

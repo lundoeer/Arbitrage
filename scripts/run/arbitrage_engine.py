@@ -11,13 +11,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.common.buy_execution import BuyIdempotencyState
+from scripts.common.buy_execution import BuyExecutionClients, BuyIdempotencyState
 from scripts.common.buy_fsm import BuyFsmRuntime
 from scripts.common.decision_runtime import SharePriceRuntime
 from scripts.common.edge_snapshots import build_edge_snapshot as _build_edge_snapshot
 from scripts.common.engine_logger import EngineLogger
 from scripts.common.engine_setup import (
     build_buy_execution_clients,
+    build_sell_execution_clients,
     build_position_components,
 )
 from scripts.common.kalshi_auth import resolve_kalshi_ws_headers
@@ -26,6 +27,7 @@ from scripts.common.position_runtime import PositionRuntime, PositionRuntimeConf
 from scripts.common.run_config import (
     BuyExecutionRuntimeConfig,
     PositionMonitoringRuntimeConfig,
+    SellExecutionRuntimeConfig,
     WsHealthConfig,
     health_config_to_dict,
     decision_config_to_dict,
@@ -46,14 +48,17 @@ class ArbitrageEngine:
         health_config: WsHealthConfig,
         decision_config: Any,
         buy_execution_config: BuyExecutionRuntimeConfig,
+        sell_execution_config: SellExecutionRuntimeConfig,
         position_monitoring_config: PositionMonitoringRuntimeConfig,
         position_reconcile_config: PositionReconcileLoopConfig,
         buy_execution_requested: bool,
+        sell_execution_requested: bool,
         position_monitoring_requested: bool,
         account_snapshot_logging_enabled: bool,
         buy_execution_cooldown_ms: int,
         buy_execution_max_attempts: int,
         buy_execution_parallel_leg_timeout_ms: int,
+        sell_execution_parallel_leg_timeout_ms: int,
         polymarket_user_ws_enabled: bool,
         kalshi_market_positions_ws_enabled: bool,
         kalshi_user_orders_ws_enabled: bool,
@@ -64,15 +69,18 @@ class ArbitrageEngine:
         self.health_config = health_config
         self.decision_config = decision_config
         self.buy_execution_config = buy_execution_config
+        self.sell_execution_config = sell_execution_config
         self.position_monitoring_config = position_monitoring_config
         self.position_reconcile_config = position_reconcile_config
 
         self.buy_execution_requested = buy_execution_requested
+        self.sell_execution_requested = sell_execution_requested
         self.position_monitoring_requested = position_monitoring_requested
         self.account_snapshot_logging_enabled = account_snapshot_logging_enabled
         self.buy_execution_cooldown_ms = buy_execution_cooldown_ms
         self.buy_execution_max_attempts = buy_execution_max_attempts
         self.buy_execution_parallel_leg_timeout_ms = buy_execution_parallel_leg_timeout_ms
+        self.sell_execution_parallel_leg_timeout_ms = sell_execution_parallel_leg_timeout_ms
         self.polymarket_user_ws_enabled = polymarket_user_ws_enabled
         self.kalshi_market_positions_ws_enabled = kalshi_market_positions_ws_enabled
         self.kalshi_user_orders_ws_enabled = kalshi_user_orders_ws_enabled
@@ -84,10 +92,12 @@ class ArbitrageEngine:
         self.buy_execution_attempt_state: Dict[str, int] = {"attempts_used": 0}
         
         self.buy_execution_setup_errors: list[str] = []
+        self.sell_execution_setup_errors: list[str] = []
         self.position_monitoring_setup_errors: list[str] = []
         self.account_snapshot_setup_errors: list[str] = []
 
         self.buy_execution_enabled_last = False
+        self.sell_execution_enabled_last = False
         self.position_monitoring_enabled_last = False
 
         self.market_segments: list[Dict[str, Any]] = []
@@ -133,6 +143,15 @@ class ArbitrageEngine:
             "buy_execution_blocked_fsm_signals": 0,
             "buy_execution_blocked_max_attempts": 0,
             "buy_execution_blocked_position_health": 0,
+            "sell_execution_attempts": 0,
+            "sell_execution_submitted": 0,
+            "sell_execution_partially_submitted": 0,
+            "sell_execution_rejected": 0,
+            "sell_execution_skipped_idempotent": 0,
+            "sell_execution_errors": 0,
+            "sell_execution_disabled_signals": 0,
+            "sell_execution_blocked_fsm_signals": 0,
+            "sell_execution_blocked_position_health": 0,
             "position_poll_iterations": 0,
             "position_poll_polymarket_success": 0,
             "position_poll_polymarket_failure": 0,
@@ -154,6 +173,7 @@ class ArbitrageEngine:
             "last_position_poll": None,
             "last_decision": None,
             "last_buy_execution": None,
+            "last_sell_execution": None,
             "buy_fsm": None,
         }
 
@@ -173,7 +193,7 @@ class ArbitrageEngine:
         
         # Build Buy Execution Clients
         segment_buy_execution_enabled = False
-        segment_buy_execution_clients = None
+        segment_buy_execution_clients = BuyExecutionClients()
         segment_buy_execution_setup_errors: list[str] = []
         if self.buy_execution_requested:
             (
@@ -199,6 +219,35 @@ class ArbitrageEngine:
                 print("Buy execution enabled for current market segment.")
         else:
             self.buy_execution_enabled_last = False
+
+        # Build Sell Execution Clients
+        segment_sell_execution_enabled = False
+        segment_sell_execution_clients = BuyExecutionClients()
+        segment_sell_execution_setup_errors: list[str] = []
+        if self.sell_execution_requested:
+            (
+                segment_sell_execution_enabled,
+                segment_sell_execution_clients,
+                segment_sell_execution_setup_errors,
+            ) = build_sell_execution_clients(
+                enable_sell_execution=True,
+                sell_execution_config=self.sell_execution_config,
+            )
+            self.sell_execution_enabled_last = bool(segment_sell_execution_enabled)
+            for entry in segment_sell_execution_setup_errors:
+                if entry not in self.sell_execution_setup_errors:
+                    self.sell_execution_setup_errors.append(entry)
+            if not bool(segment_sell_execution_enabled):
+                print(
+                    "Sell execution setup failed for discovered market segment; "
+                    "execution disabled for this segment:"
+                )
+                for entry in segment_sell_execution_setup_errors:
+                    print(f"  - {entry}")
+            else:
+                print("Sell execution enabled for current market segment.")
+        else:
+            self.sell_execution_enabled_last = False
 
         # Build position runtimes and websockets
         segment_position_runtime: Optional[PositionRuntime] = None
@@ -277,6 +326,7 @@ class ArbitrageEngine:
                         outcome_side=outcome_side,
                         filled_contracts=float(size),
                         fill_price=price,
+                        action=str(event.get("order_side") or ""),
                         now_epoch_ms=now_ms(),
                     )
             if kind in {"polymarket_user_trade", "polymarket_user_order"}:
@@ -504,10 +554,13 @@ class ArbitrageEngine:
                     edge_snapshot_poll_seconds=float(self.args.edge_snapshot_poll_seconds),
                     buy_execution_enabled=bool(segment_buy_execution_enabled),
                     buy_execution_clients=segment_buy_execution_clients,
+                    sell_execution_enabled=bool(segment_sell_execution_enabled),
+                    sell_execution_clients=segment_sell_execution_clients,
                     buy_idempotency_state=self.buy_idempotency_state,
                     buy_execution_cooldown_ms=self.buy_execution_cooldown_ms,
                     buy_execution_max_attempts=self.buy_execution_max_attempts,
                     buy_execution_parallel_leg_timeout_ms=self.buy_execution_parallel_leg_timeout_ms,
+                    sell_execution_parallel_leg_timeout_ms=self.sell_execution_parallel_leg_timeout_ms,
                     buy_execution_attempt_state=self.buy_execution_attempt_state,
                 )
             )
@@ -540,6 +593,7 @@ class ArbitrageEngine:
 
         self.stats["last_decision"] = segment_stats.get("last_decision")
         self.stats["last_buy_execution"] = segment_stats.get("last_buy_execution")
+        self.stats["last_sell_execution"] = segment_stats.get("last_sell_execution")
         self.stats["buy_fsm"] = segment_stats.get("buy_fsm")
         self.stats["last_position_health"] = segment_stats.get("last_position_health")
         self.stats["last_position_poll"] = segment_stats.get("last_position_poll")
@@ -639,4 +693,12 @@ class ArbitrageEngine:
             f"submitted={int(self.stats.get('buy_execution_submitted', 0))}, "
             f"rejected={int(self.stats.get('buy_execution_rejected', 0))}, "
             f"errors={int(self.stats.get('buy_execution_errors', 0))}"
+        )
+        print(
+            "Sell execution: "
+            f"enabled={bool(self.sell_execution_enabled_last)}, "
+            f"attempts={int(self.stats.get('sell_execution_attempts', 0))}, "
+            f"submitted={int(self.stats.get('sell_execution_submitted', 0))}, "
+            f"rejected={int(self.stats.get('sell_execution_rejected', 0))}, "
+            f"errors={int(self.stats.get('sell_execution_errors', 0))}"
         )

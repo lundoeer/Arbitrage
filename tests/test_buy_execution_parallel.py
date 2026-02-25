@@ -28,6 +28,7 @@ class _DelayBuyClient:
         limit_price: float | None,
         time_in_force: str | None,
         client_order_id: str,
+        planning_reference_best_ask: float | None = None,
     ) -> Dict[str, Any]:
         self.calls += 1
         time.sleep(self.delay_seconds)
@@ -44,6 +45,9 @@ class _DelayBuyClient:
                 "limit_price": None if limit_price is None else float(limit_price),
                 "time_in_force": time_in_force,
                 "client_order_id": client_order_id,
+                "planning_reference_best_ask": (
+                    None if planning_reference_best_ask is None else float(planning_reference_best_ask)
+                ),
             },
             "response": {"id": f"{self.venue}-{self.calls}"},
         }
@@ -202,3 +206,56 @@ def test_parallel_submit_results_preserve_original_leg_order() -> None:
     assert result.status == "submitted"
     assert [leg.leg_index for leg in result.legs] == [0, 1]
     assert [leg.venue for leg in result.legs] == [plan.legs[0].venue, plan.legs[1].venue]
+
+
+def test_parallel_preflight_rejects_polymarket_market_buy_without_planning_reference_best_ask() -> None:
+    kalshi = _DelayBuyClient(venue="kalshi", delay_seconds=0.05, should_fail=False)
+    polymarket = _DelayBuyClient(venue="polymarket", delay_seconds=0.05, should_fail=False)
+    clients = BuyExecutionClients(polymarket=polymarket, kalshi=kalshi)
+    state = BuyIdempotencyState()
+    plan = BuyExecutionPlan.from_dict(
+        {
+            "signal_id": "sig-parallel-preflight-best-ask-1",
+            "market": {"polymarket_market_id": "pm-1", "kalshi_ticker": "KXBTC15M-TEST"},
+            "created_at_ms": 1730000000000,
+            "execution_mode": "two_leg_parallel",
+            "legs": [
+                {
+                    "venue": "kalshi",
+                    "side": "yes",
+                    "action": "buy",
+                    "instrument_id": "KXBTC15M-TEST",
+                    "order_kind": "market",
+                    "limit_price": 0.65,
+                    "size": 2.0,
+                    "time_in_force": "fak",
+                },
+                {
+                    "venue": "polymarket",
+                    "side": "no",
+                    "action": "buy",
+                    "instrument_id": "pm-token-no",
+                    "order_kind": "market",
+                    "limit_price": 0.55,
+                    "size": 2.0,
+                    "time_in_force": "fak",
+                    # no metadata.planning_reference_best_ask on purpose
+                },
+            ],
+        }
+    )
+
+    result = execute_cross_venue_buy(
+        plan=plan,
+        clients=clients,
+        state=state,
+        now_epoch_ms=1730000000700,
+        parallel_leg_timeout_ms=2000,
+    )
+
+    assert result.status == "rejected"
+    assert result.error == "preflight_validation_failed"
+    assert kalshi.calls == 0
+    assert polymarket.calls == 0
+    assert len(result.legs) == 2
+    assert any((leg.error or "").startswith("preflight_missing_positive_planning_reference_best_ask") for leg in result.legs)

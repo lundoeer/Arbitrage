@@ -9,7 +9,9 @@ from scripts.common.run_config import (
     load_buy_execution_runtime_config_from_run_config,
     load_decision_config_from_run_config,
     load_position_monitoring_runtime_config_from_run_config,
+    load_sell_execution_runtime_config_from_run_config,
     position_monitoring_runtime_config_to_dict,
+    sell_execution_runtime_config_to_dict,
 )
 
 
@@ -83,6 +85,13 @@ def test_decision_buy_sizing_defaults_when_missing(tmp_path: Path) -> None:
     assert cfg.buy.min_size_per_leg_contracts == 0.0
     assert cfg.buy.min_notional_per_leg_usd == 0.0
     assert cfg.buy.best_ask_size_safety_factor == 0.5
+    assert cfg.buy.market_emulation_slippage == 0.02
+    assert cfg.sell.min_gross_edge_threshold == 0.0
+    assert cfg.sell.max_size_cap_per_leg == 0.0
+    assert cfg.sell.min_size_per_leg_contracts == 0.0
+    assert cfg.sell.min_notional_per_leg_usd == 0.0
+    assert cfg.sell.best_bid_size_safety_factor == 1.0
+    assert cfg.sell.market_emulation_slippage == 0.02
 
 
 def test_decision_buy_sizing_custom_values_round_trip(tmp_path: Path) -> None:
@@ -97,7 +106,16 @@ def test_decision_buy_sizing_custom_values_round_trip(tmp_path: Path) -> None:
                 "min_size_per_leg_contracts": 2.0,
                 "min_notional_per_leg_usd": 1.75,
                 "best_ask_size_safety_factor": 0.7,
-            }
+                "market_emulation_slippage": 0.03,
+            },
+            "sell": {
+                "min_gross_edge_threshold": 0.03,
+                "max_size_cap_per_leg": 9.0,
+                "min_size_per_leg_contracts": 2.0,
+                "min_notional_per_leg_usd": 1.25,
+                "best_bid_size_safety_factor": 0.6,
+                "market_emulation_slippage": 0.02,
+            },
         },
     )
     cfg = load_decision_config_from_run_config(config_path=config_path)
@@ -109,6 +127,61 @@ def test_decision_buy_sizing_custom_values_round_trip(tmp_path: Path) -> None:
         "min_size_per_leg_contracts": 2.0,
         "min_notional_per_leg_usd": 1.75,
         "best_ask_size_safety_factor": 0.7,
+        "market_emulation_slippage": 0.03,
+    }
+    assert serialized["sell"] == {
+        "min_gross_edge_threshold": 0.03,
+        "max_size_cap_per_leg": 9.0,
+        "min_size_per_leg_contracts": 2.0,
+        "min_notional_per_leg_usd": 1.25,
+        "best_bid_size_safety_factor": 0.6,
+        "market_emulation_slippage": 0.02,
+    }
+
+
+def test_sell_execution_defaults_when_missing(tmp_path: Path) -> None:
+    config_path = tmp_path / "run_config_sell_defaults.json"
+    _write_config(config_path, {})
+    cfg = load_sell_execution_runtime_config_from_run_config(config_path=config_path)
+    assert cfg.enabled is False
+    assert cfg.parallel_leg_timeout_ms == 4000
+    assert cfg.api_retry.enabled is True
+    assert cfg.api_retry.max_attempts == 3
+    assert cfg.api_retry.base_backoff_seconds == 0.5
+    assert cfg.api_retry.jitter_ratio == 0.2
+    assert cfg.api_retry.include_post is True
+
+
+def test_sell_execution_custom_values_round_trip(tmp_path: Path) -> None:
+    config_path = tmp_path / "run_config_sell_custom.json"
+    _write_config(
+        config_path,
+        {
+            "sell_execution": {
+                "enabled": True,
+                "parallel_leg_timeout_ms": 2500,
+                "api_retry": {
+                    "enabled": True,
+                    "max_attempts": 4,
+                    "base_backoff_seconds": 0.25,
+                    "jitter_ratio": 0.1,
+                    "include_post": False,
+                },
+            }
+        },
+    )
+    cfg = load_sell_execution_runtime_config_from_run_config(config_path=config_path)
+    serialized = sell_execution_runtime_config_to_dict(cfg)
+    assert serialized == {
+        "enabled": True,
+        "parallel_leg_timeout_ms": 2500,
+        "api_retry": {
+            "enabled": True,
+            "max_attempts": 4,
+            "base_backoff_seconds": 0.25,
+            "jitter_ratio": 0.1,
+            "include_post": False,
+        },
     }
 
 

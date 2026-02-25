@@ -25,6 +25,7 @@ class _DummyBuyClient:
         limit_price: float | None,
         time_in_force: str | None,
         client_order_id: str,
+        planning_reference_best_ask: float | None = None,
     ) -> Dict[str, Any]:
         self.calls += 1
         return {
@@ -38,6 +39,9 @@ class _DummyBuyClient:
                 "limit_price": None if limit_price is None else float(limit_price),
                 "time_in_force": time_in_force,
                 "client_order_id": client_order_id,
+                "planning_reference_best_ask": (
+                    None if planning_reference_best_ask is None else float(planning_reference_best_ask)
+                ),
             },
             "response": {"id": f"{self.venue}-{self.calls}"},
         }

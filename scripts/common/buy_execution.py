@@ -283,6 +283,19 @@ class BuyVenueClient(Protocol):
         limit_price: Optional[float],
         time_in_force: Optional[str],
         client_order_id: str,
+        planning_reference_best_ask: Optional[float] = None,
+    ) -> Dict[str, Any]: ...
+
+    def place_sell_order(
+        self,
+        *,
+        instrument_id: str,
+        side: str,
+        size: float,
+        order_kind: str,
+        limit_price: Optional[float],
+        time_in_force: Optional[str],
+        client_order_id: str,
     ) -> Dict[str, Any]: ...
 
 
@@ -397,9 +410,10 @@ class KalshiApiBuyClient(BuyVenueClient):
         )
         return base64.b64encode(signature).decode("utf-8")
 
-    def place_buy_order(
+    def _place_order(
         self,
         *,
+        action: str,
         instrument_id: str,
         side: str,
         size: float,
@@ -407,18 +421,22 @@ class KalshiApiBuyClient(BuyVenueClient):
         limit_price: Optional[float],
         time_in_force: Optional[str],
         client_order_id: str,
+        planning_reference_best_ask: Optional[float] = None,
     ) -> Dict[str, Any]:
         ticker = str(instrument_id or "").strip()
+        action_norm = str(action or "").strip().lower()
         side_norm = str(side or "").strip().lower()
         kind = str(order_kind or "").strip().lower()
+        if action_norm not in {"buy", "sell"}:
+            raise RuntimeError(f"Kalshi action must be buy/sell, got: {action}")
         if not ticker:
-            raise RuntimeError("Kalshi buy order requires instrument_id ticker")
+            raise RuntimeError(f"Kalshi {action_norm} order requires instrument_id ticker")
         if side_norm not in {"yes", "no"}:
             raise RuntimeError(f"Kalshi side must be yes/no, got: {side}")
 
         count = int(math.floor(float(size)))
         if count <= 0:
-            raise RuntimeError("Kalshi buy order requires positive size")
+            raise RuntimeError(f"Kalshi {action_norm} order requires positive size")
 
         # Kalshi create-order expects an explicit side price. We emulate
         # market intent by submitting aggressive priced limit orders.
@@ -433,7 +451,7 @@ class KalshiApiBuyClient(BuyVenueClient):
             "ticker": ticker,
             "client_order_id": str(client_order_id),
             "type": "limit",
-            "action": "buy",
+            "action": action_norm,
             "side": side_norm,
             "count": count,
             "time_in_force": _kalshi_time_in_force(time_in_force),
@@ -465,6 +483,52 @@ class KalshiApiBuyClient(BuyVenueClient):
             "request": payload,
             "response": response_payload,
         }
+
+    def place_buy_order(
+        self,
+        *,
+        instrument_id: str,
+        side: str,
+        size: float,
+        order_kind: str,
+        limit_price: Optional[float],
+        time_in_force: Optional[str],
+        client_order_id: str,
+        planning_reference_best_ask: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return self._place_order(
+            action="buy",
+            instrument_id=instrument_id,
+            side=side,
+            size=size,
+            order_kind=order_kind,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            client_order_id=client_order_id,
+            planning_reference_best_ask=planning_reference_best_ask,
+        )
+
+    def place_sell_order(
+        self,
+        *,
+        instrument_id: str,
+        side: str,
+        size: float,
+        order_kind: str,
+        limit_price: Optional[float],
+        time_in_force: Optional[str],
+        client_order_id: str,
+    ) -> Dict[str, Any]:
+        return self._place_order(
+            action="sell",
+            instrument_id=instrument_id,
+            side=side,
+            size=size,
+            order_kind=order_kind,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            client_order_id=client_order_id,
+        )
 
 
 class PolymarketSignedOrderBuilder(Protocol):
@@ -560,6 +624,19 @@ def _polymarket_market_buy_price_cap_from_env(default: float = 0.99) -> float:
         raise RuntimeError(f"Invalid POLYMARKET_MARKET_BUY_PRICE_CAP value: {raw}") from exc
     if value <= 0.0 or value > 1.0:
         raise RuntimeError(f"Invalid POLYMARKET_MARKET_BUY_PRICE_CAP value: {raw} (expected >0 and <=1)")
+    return float(value)
+
+
+def _polymarket_market_sell_price_floor_from_env(default: float = 0.01) -> float:
+    raw = str(os.getenv("POLYMARKET_MARKET_SELL_PRICE_FLOOR", "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Invalid POLYMARKET_MARKET_SELL_PRICE_FLOOR value: {raw}") from exc
+    if value <= 0.0 or value > 1.0:
+        raise RuntimeError(f"Invalid POLYMARKET_MARKET_SELL_PRICE_FLOOR value: {raw} (expected >0 and <=1)")
     return float(value)
 
 
@@ -714,31 +791,42 @@ def _build_polymarket_signed_order(
     order_args_cls: Any,
     market_order_args_cls: Any,
     l2_api_key: str,
+    action: str,
     instrument_id: str,
     size: float,
     order_kind: str,
     limit_price: Optional[float],
     time_in_force: Optional[str],
     nonce: int,
+    planning_reference_best_ask: Optional[float] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     token_id = str(instrument_id or "").strip()
+    action_norm = str(action or "").strip().lower()
     kind = str(order_kind or "").strip().lower()
+    if action_norm not in {"buy", "sell"}:
+        raise RuntimeError(f"Polymarket action must be buy/sell, got: {action}")
     if not token_id:
-        raise RuntimeError("Polymarket buy order requires instrument_id token_id")
+        raise RuntimeError(f"Polymarket {action_norm} order requires instrument_id token_id")
 
     effective_limit_price = limit_price
     if kind == "market" and effective_limit_price is None:
-        # Polymarket CLOB is signed limit-style; emulate market with a high
-        # buy cap and FAK so the order does not rest.
-        effective_limit_price = _polymarket_market_buy_price_cap_from_env(default=0.99)
+        if action_norm == "buy":
+            # Polymarket CLOB is signed limit-style; emulate market with a high
+            # buy cap and FAK so the order does not rest.
+            effective_limit_price = _polymarket_market_buy_price_cap_from_env(default=0.99)
+        else:
+            # For sells, emulate market with a low floor so the order crosses.
+            effective_limit_price = _polymarket_market_sell_price_floor_from_env(default=0.01)
     if effective_limit_price is None:
         raise RuntimeError("Polymarket order signing requires limit_price")
     if float(size) <= 0:
-        raise RuntimeError("Polymarket buy order requires positive size")
-    if kind == "market":
+        raise RuntimeError(f"Polymarket {action_norm} order requires positive size")
+    if kind == "market" and action_norm == "buy":
         # BUY market orders expect quote amount ($), while planner sizing is
-        # in shares. Convert shares to notional using the chosen price cap.
-        quote_amount = float(size) * float(effective_limit_price)
+        # in shares. Use planning best ask as quote conversion anchor.
+        if planning_reference_best_ask is None or float(planning_reference_best_ask) <= 0:
+            raise RuntimeError("Polymarket market buy requires positive planning_reference_best_ask")
+        quote_amount = float(size) * float(planning_reference_best_ask)
         signed_order = clob_client.create_market_order(
             market_order_args_cls(
                 token_id=token_id,
@@ -750,12 +838,13 @@ def _build_polymarket_signed_order(
             )
         )
     else:
+        side = "BUY" if action_norm == "buy" else "SELL"
         signed_order = clob_client.create_order(
             order_args_cls(
                 token_id=token_id,
                 price=float(effective_limit_price),
                 size=float(size),
-                side="BUY",
+                side=side,
                 nonce=int(nonce),
             )
         )
@@ -765,6 +854,9 @@ def _build_polymarket_signed_order(
         "orderType": _polymarket_order_type(time_in_force if time_in_force else order_kind),
         "postOnly": False,
     }
+    if kind == "market" and action_norm == "buy":
+        payload["planning_reference_best_ask"] = float(planning_reference_best_ask)  # type: ignore[arg-type]
+        payload["quote_amount"] = float(quote_amount)
     return signed_order, payload
 
 
@@ -972,6 +1064,7 @@ def build_polymarket_order_signing_providers_from_env(
             order_args_cls=clob_context.order_args_cls,
             market_order_args_cls=clob_context.market_order_args_cls,
             l2_api_key=clob_context.l2_api_key,
+            action="buy",
             instrument_id=instrument_id,
             size=float(size),
             order_kind=order_kind,
@@ -1056,9 +1149,10 @@ class PolymarketApiBuyClient(BuyVenueClient):
         )
         self.transport = transport or ApiTransport(timeout_seconds=10)
 
-    def place_buy_order(
+    def _place_order(
         self,
         *,
+        action: str,
         instrument_id: str,
         side: str,
         size: float,
@@ -1066,6 +1160,7 @@ class PolymarketApiBuyClient(BuyVenueClient):
         limit_price: Optional[float],
         time_in_force: Optional[str],
         client_order_id: str,
+        planning_reference_best_ask: Optional[float] = None,
     ) -> Dict[str, Any]:
         def _submit_once() -> Tuple[int, Dict[str, Any], Any]:
             nonce = self.nonce_manager.peek_nonce()
@@ -1074,12 +1169,14 @@ class PolymarketApiBuyClient(BuyVenueClient):
                 order_args_cls=self.order_args_cls,
                 market_order_args_cls=self.market_order_args_cls,
                 l2_api_key=self.l2_api_key,
+                action=action,
                 instrument_id=instrument_id,
                 size=float(size),
                 order_kind=order_kind,
                 limit_price=limit_price,
                 time_in_force=time_in_force,
                 nonce=nonce,
+                planning_reference_best_ask=planning_reference_best_ask,
             )
             response_payload_inner = self._post_order_with_retry(signed_order, payload)
             return nonce, payload, response_payload_inner
@@ -1100,6 +1197,52 @@ class PolymarketApiBuyClient(BuyVenueClient):
             "request": payload,
             "response": response_payload,
         }
+
+    def place_buy_order(
+        self,
+        *,
+        instrument_id: str,
+        side: str,
+        size: float,
+        order_kind: str,
+        limit_price: Optional[float],
+        time_in_force: Optional[str],
+        client_order_id: str,
+        planning_reference_best_ask: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return self._place_order(
+            action="buy",
+            instrument_id=instrument_id,
+            side=side,
+            size=size,
+            order_kind=order_kind,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            client_order_id=client_order_id,
+            planning_reference_best_ask=planning_reference_best_ask,
+        )
+
+    def place_sell_order(
+        self,
+        *,
+        instrument_id: str,
+        side: str,
+        size: float,
+        order_kind: str,
+        limit_price: Optional[float],
+        time_in_force: Optional[str],
+        client_order_id: str,
+    ) -> Dict[str, Any]:
+        return self._place_order(
+            action="sell",
+            instrument_id=instrument_id,
+            side=side,
+            size=size,
+            order_kind=order_kind,
+            limit_price=limit_price,
+            time_in_force=time_in_force,
+            client_order_id=client_order_id,
+        )
 
     def _post_order_with_retry(self, signed_order: Any, payload: Dict[str, Any]) -> Any:
         """Call post_order with retry/backoff from the configured transport."""
@@ -1166,8 +1309,9 @@ def _build_leg_request_payload(
     signal_id: str,
     leg: BuyExecutionLeg,
     client_order_id: str,
+    planning_reference_best_ask: Optional[float] = None,
 ) -> Dict[str, Any]:
-    return {
+    payload = {
         "signal_id": signal_id,
         "venue": leg.venue,
         "side": leg.side,
@@ -1179,6 +1323,19 @@ def _build_leg_request_payload(
         "time_in_force": leg.time_in_force,
         "client_order_id": client_order_id,
     }
+    if planning_reference_best_ask is not None:
+        payload["planning_reference_best_ask"] = float(planning_reference_best_ask)
+    return payload
+
+
+def _resolve_planning_reference_best_ask(leg: BuyExecutionLeg) -> Optional[float]:
+    if str(leg.venue or "").strip().lower() != "polymarket":
+        return None
+    if str(leg.action or "").strip().lower() not in {"", "buy"}:
+        return None
+    if str(leg.order_kind or "").strip().lower() != "market":
+        return None
+    return _as_float((leg.metadata or {}).get("planning_reference_best_ask"))
 
 
 def _submit_leg(
@@ -1190,10 +1347,12 @@ def _submit_leg(
     clients: BuyExecutionClients,
 ) -> LegSubmitResult:
     submit_started_ms = now_ms()
+    planning_reference_best_ask = _resolve_planning_reference_best_ask(leg)
     request_payload = _build_leg_request_payload(
         signal_id=signal_id,
         leg=leg,
         client_order_id=client_order_id,
+        planning_reference_best_ask=planning_reference_best_ask,
     )
     client = _resolve_client(venue=leg.venue, clients=clients)
     if client is None:
@@ -1213,15 +1372,30 @@ def _submit_leg(
         )
 
     try:
-        response = client.place_buy_order(
-            instrument_id=leg.instrument_id,
-            side=leg.side,
-            size=float(leg.size),
-            order_kind=leg.order_kind,
-            limit_price=leg.limit_price,
-            time_in_force=leg.time_in_force,
-            client_order_id=client_order_id,
-        )
+        action = str(leg.action or "").strip().lower()
+        if action == "sell":
+            response = client.place_sell_order(
+                instrument_id=leg.instrument_id,
+                side=leg.side,
+                size=float(leg.size),
+                order_kind=leg.order_kind,
+                limit_price=leg.limit_price,
+                time_in_force=leg.time_in_force,
+                client_order_id=client_order_id,
+            )
+        elif action in {"", "buy"}:
+            response = client.place_buy_order(
+                instrument_id=leg.instrument_id,
+                side=leg.side,
+                size=float(leg.size),
+                order_kind=leg.order_kind,
+                limit_price=leg.limit_price,
+                time_in_force=leg.time_in_force,
+                client_order_id=client_order_id,
+                planning_reference_best_ask=planning_reference_best_ask,
+            )
+        else:
+            raise RuntimeError(f"unsupported_leg_action:{action}")
         submit_completed_ms = now_ms()
         return LegSubmitResult(
             leg_index=int(leg_index),
@@ -1280,6 +1454,57 @@ def execute_cross_venue_buy(
             error=None,
         )
 
+    preflight_errors: Dict[int, str] = {}
+    for idx, leg in enumerate(plan.legs):
+        planning_reference_best_ask = _resolve_planning_reference_best_ask(leg)
+        if planning_reference_best_ask is None or float(planning_reference_best_ask) <= 0:
+            if (
+                str(leg.venue or "").strip().lower() == "polymarket"
+                and str(leg.action or "").strip().lower() in {"", "buy"}
+                and str(leg.order_kind or "").strip().lower() == "market"
+            ):
+                preflight_errors[idx] = "preflight_missing_positive_planning_reference_best_ask"
+
+    if preflight_errors:
+        completed_at = now_ms()
+        client_order_ids = plan_client_order_ids(plan)
+        leg_results: List[LegSubmitResult] = []
+        for idx, leg in enumerate(plan.legs):
+            planning_reference_best_ask = _resolve_planning_reference_best_ask(leg)
+            leg_results.append(
+                LegSubmitResult(
+                    leg_index=int(idx),
+                    venue=leg.venue,
+                    side=leg.side,
+                    instrument_id=leg.instrument_id,
+                    client_order_id=client_order_ids[idx],
+                    submit_started_ms=submitted_at,
+                    submit_completed_ms=completed_at,
+                    request_payload=_build_leg_request_payload(
+                        signal_id=plan.signal_id,
+                        leg=leg,
+                        client_order_id=client_order_ids[idx],
+                        planning_reference_best_ask=planning_reference_best_ask,
+                    ),
+                    response_payload=None,
+                    submitted=False,
+                    error=preflight_errors.get(idx, "blocked_by_preflight_validation"),
+                )
+            )
+        return BuyExecutionResult(
+            signal_id=plan.signal_id,
+            status="rejected",
+            submitted_at_ms=submitted_at,
+            completed_at_ms=completed_at,
+            legs=leg_results,
+            idempotency={
+                "hit": False,
+                "signal_id": plan.signal_id,
+                "client_order_ids": {f"leg_{idx + 1}": cid for idx, cid in enumerate(client_order_ids)},
+            },
+            error="preflight_validation_failed",
+        )
+
     client_order_ids = plan_client_order_ids(plan)
     state.mark_in_flight(
         signal_id=plan.signal_id,
@@ -1329,6 +1554,7 @@ def execute_cross_venue_buy(
                         signal_id=plan.signal_id,
                         leg=leg,
                         client_order_id=client_order_ids[idx],
+                        planning_reference_best_ask=_resolve_planning_reference_best_ask(leg),
                     ),
                     response_payload=None,
                     submitted=False,
@@ -1351,6 +1577,7 @@ def execute_cross_venue_buy(
                     signal_id=plan.signal_id,
                     leg=leg,
                     client_order_id=client_order_ids[idx],
+                    planning_reference_best_ask=_resolve_planning_reference_best_ask(leg),
                 ),
                 response_payload=None,
                 submitted=False,
@@ -1379,6 +1606,7 @@ def execute_cross_venue_buy(
                     signal_id=plan.signal_id,
                     leg=leg,
                     client_order_id=client_order_ids[idx],
+                    planning_reference_best_ask=_resolve_planning_reference_best_ask(leg),
                 ),
                 response_payload=None,
                 submitted=False,
