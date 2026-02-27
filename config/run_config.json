@@ -74,7 +74,7 @@
   "execution": {
     "best_ask_and_bids_at_max": 0.89,
     "best_ask_and_bids_at_min": 0.11,
-    "market_start_trade_time_seconds": 60,
+    "market_start_trade_time_seconds": 120,
     "market_end_trade_time_seconds": 120
   }
 }

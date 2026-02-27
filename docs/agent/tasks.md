@@ -42,26 +42,13 @@ How this file is structured:
 
 - [x] #24 -Implement selling positions based on bids - this should also check size but have its own thresholds and such and the size is limited to current positions, and it is checking bid sizes not ask like buying i think. I would like this to mirror and reuse the implementations from buying as much as possible. I am thinking they are very similar. the main difference is determining sizing, I am unsure how different the order types are in selling for the venues. If these are very different this would cause more changes
 - [x] #36 - Implement market_emulation_slippage config for buying. to replace the current hardcoded value.
-- [x] #35 - Implement get trades today and yesterday, with optional flag for other period. The script should create or update a file in logs/trade_log. I am a little unsure which fields should be in the file. I imainge getting this from:
-
-      https://docs.polymarket.com/api-reference/trade/get-trades - individual trades
-      https://docs.polymarket.com/api-reference/core/get-closed-positions-for-a-user end of market
-      https://docs.kalshi.com/api-reference/portfolio/get-settlements end of market
-      https://docs.kalshi.com/api-reference/portfolio/get-fills individual trades
-
-I would like this sorted by time, and I imagine something like this
-trades pr. market pair with these fields
-time, market, action (side in polymaket), size, price (for kalshi this depends on kalshi side), fee, outcome, outcomeIndex
-
-at the end of each market pair there is a line with outcome for each venue, with these fields
-market, size, total cost, fee, outcome, revenue.
-
-I would like runs to add new lines to the log if there are additional lines. there are some differences between kalshi and polymarket but just ask if you have any doubts after reading the documentation from kalshi and polymarket.
+- [x] #35 - Implement get trades today and yesterday, with optional flag for other period.
 
 ## Now
 
 ## Next
 
+- [ ] #37 - Improve Polymarket order-failure diagnostics for `PolyApiException[status_code=None, error_message=Request exception!]`: log underlying transport exception context (type/message/trace), record per-attempt timing + retry metadata, and explicitly distinguish transport failures from API-limit responses (e.g., 425/429) in buy execution logs.
 - [ ] #33 - Implement market surveillance - target price on market start and through chainlink - and regular current price surveillance. It should be evenly spread between target and price differences. investigate this also
 - [ ] #36 - always log failed order and their responses.
 

@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Enrich resolved BTC 15m pair log lines with Kalshi and Polymarket price values.
+Fill missing Kalshi price fields in resolved_15m_pairs.log.
 
-For each line in data/diagnostic/resolved_15m_pairs.log, append/update:
-- kalshi_target (floor_strike)
-- kalshi_end (expiration_value)
-- polymarket_target (Chainlink window start price)
-- polymarket_end (Chainlink window end price)
+Selection rule:
+- row already has polymarket_target and polymarket_end
+- row is missing kalshi_target and/or kalshi_end
+
+This script does not depend on a Polymarket validation log.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import logging
 import os
 import re
 import sys
@@ -29,8 +28,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.common.api_transport import ApiTransport
 
-logging.getLogger("dotenv.main").setLevel(logging.ERROR)
-
 KALSHI_DEFAULT_API_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 OVERLOAD_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529})
 
@@ -40,10 +37,6 @@ BASE_PATTERN = re.compile(
     r"polymarket=(?P<pm_slug>[^:]+):(?P<pm_raw>[^()]+)\((?P<pm_norm>[^()]*)\)\s+\|\s+"
     r"(?P<comparison>[^|]+)"
     r"(?P<extras>.*)$"
-)
-POLYMARKET_VALIDATION_PATTERN = re.compile(
-    r"^(?P<slug>[^|]+)\s+\|\s+window_end=.*\|\s+target=(?P<target>[^|]+)\s+\|\s+"
-    r"end=(?P<end>[^|]+)\s+\|"
 )
 
 
@@ -68,12 +61,9 @@ def _parse_extras(raw_extras: str) -> Dict[str, str]:
     text = raw_extras.strip()
     if not text:
         return extras
-
-    parts = [part.strip() for part in text.split("|")]
-    for part in parts:
-        if not part:
-            continue
-        if "=" not in part:
+    for part in text.split("|"):
+        part = part.strip()
+        if not part or "=" not in part:
             continue
         key, value = part.split("=", 1)
         extras[key.strip()] = value.strip()
@@ -95,16 +85,6 @@ def _format_value(value: Any, decimals: int) -> str:
     if isinstance(value, (int, float)):
         return f"{float(value):.{decimals}f}"
     raise RuntimeError(f"Unsupported price value type: {type(value)}")
-
-
-def _has_all_price_fields(extras: Dict[str, str]) -> bool:
-    required = {
-        "kalshi_target",
-        "kalshi_end",
-        "polymarket_target",
-        "polymarket_end",
-    }
-    return all(extras.get(key, "").strip() for key in required)
 
 
 def _is_overload_error(exc: Exception) -> Tuple[bool, int | None]:
@@ -135,28 +115,6 @@ def _parse_line(line: str) -> Dict[str, Any]:
     }
 
 
-def _load_polymarket_prices_from_validation_log(path: Path) -> Dict[str, Tuple[str, str]]:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing Polymarket validation log: {path}")
-
-    prices: Dict[str, Tuple[str, str]] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        match = POLYMARKET_VALIDATION_PATTERN.match(line)
-        if not match:
-            continue
-        slug = match.group("slug").strip()
-        target = _format_value(match.group("target").strip(), decimals=8)
-        end = _format_value(match.group("end").strip(), decimals=8)
-        prices[slug] = (target, end)
-
-    if not prices:
-        raise RuntimeError(f"No parseable Polymarket prices found in validation log: {path}")
-    return prices
-
-
 def _render_line(row: Dict[str, Any]) -> str:
     extras = dict(row["extras"])
     ordered_keys = [
@@ -165,30 +123,28 @@ def _render_line(row: Dict[str, Any]) -> str:
         "polymarket_target",
         "polymarket_end",
     ]
-
     segments = [
         f"{row['window_end']}",
-        (
-            f"kalshi={row['kalshi_ticker']}:"
-            f"{row['kalshi_raw']}({row['kalshi_norm']})"
-        ),
-        (
-            f"polymarket={row['pm_slug']}:"
-            f"{row['pm_raw']}({row['pm_norm']})"
-        ),
+        f"kalshi={row['kalshi_ticker']}:{row['kalshi_raw']}({row['kalshi_norm']})",
+        f"polymarket={row['pm_slug']}:{row['pm_raw']}({row['pm_norm']})",
         row["comparison"],
     ]
-
     for key in ordered_keys:
         if key in extras:
             segments.append(f"{key}={extras[key]}")
-
     for key, value in extras.items():
         if key in ordered_keys:
             continue
         segments.append(f"{key}={value}")
-
     return " | ".join(segments)
+
+
+def _row_has_polymarket_prices(extras: Dict[str, str]) -> bool:
+    return bool(extras.get("polymarket_target", "").strip() and extras.get("polymarket_end", "").strip())
+
+
+def _row_has_kalshi_prices(extras: Dict[str, str]) -> bool:
+    return bool(extras.get("kalshi_target", "").strip() and extras.get("kalshi_end", "").strip())
 
 
 def _fetch_kalshi_prices(
@@ -200,11 +156,9 @@ def _fetch_kalshi_prices(
     _, payload = transport.request_json("GET", f"{base_url}/markets/{ticker}")
     if not isinstance(payload, dict):
         raise RuntimeError(f"Unexpected Kalshi payload for ticker {ticker}")
-
     market = payload.get("market")
     if not isinstance(market, dict):
         raise RuntimeError(f"Kalshi payload missing market object for ticker {ticker}")
-
     target = _format_value(market.get("floor_strike"), decimals=2)
     end = _format_value(market.get("expiration_value"), decimals=2)
     return target, end
@@ -214,7 +168,6 @@ def run(
     *,
     config_path: Path,
     pair_log_path: Path,
-    polymarket_validation_log_path: Path,
     only_missing: bool = True,
     max_lines: int | None = None,
     dry_run: bool = False,
@@ -232,14 +185,13 @@ def run(
     if not kalshi_api_key:
         raise RuntimeError("Missing Kalshi API key in .env or config/run_config.json")
 
-    kalshi_transport = ApiTransport(
+    transport = ApiTransport(
         default_headers={
             "Authorization": f"Bearer {kalshi_api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "Arbitrage-Resolved-Pair-Enrichment/1.0",
+            "User-Agent": "Arbitrage-Kalshi-Only-Enrichment/1.0",
         }
     )
-    polymarket_price_map = _load_polymarket_prices_from_validation_log(polymarket_validation_log_path)
 
     raw_lines = pair_log_path.read_text(encoding="utf-8").splitlines()
     parsed_rows: List[Dict[str, Any]] = []
@@ -250,9 +202,19 @@ def run(
         parsed_rows.append(_parse_line(line))
 
     candidates: List[Dict[str, Any]] = []
+    missing_polymarket_rows = 0
+    already_has_kalshi_rows = 0
     for row in parsed_rows:
-        if only_missing and _has_all_price_fields(row["extras"]):
+        extras = row["extras"]
+        has_pm = _row_has_polymarket_prices(extras)
+        has_k = _row_has_kalshi_prices(extras)
+        if not has_pm:
+            missing_polymarket_rows += 1
             continue
+        if has_k:
+            already_has_kalshi_rows += 1
+            if only_missing:
+                continue
         candidates.append(row)
 
     if max_lines is not None and max_lines > 0:
@@ -269,13 +231,13 @@ def run(
             "totals": {
                 "rows_total": len(parsed_rows),
                 "rows_selected": len(candidates),
-                "rows_already_complete": len(parsed_rows) - len(candidates),
+                "rows_missing_polymarket_prices": missing_polymarket_rows,
+                "rows_already_have_kalshi_prices": already_has_kalshi_rows,
                 "rows_updated": 0,
             },
         }
 
     kalshi_cache: Dict[str, Tuple[str, str]] = {}
-    missing_polymarket_slug_count = 0
     failed_kalshi_fetches = 0
     processed = 0
     rows_updated = 0
@@ -288,18 +250,12 @@ def run(
 
     for row in candidates:
         ticker = row["kalshi_ticker"]
-        slug = row["pm_slug"]
         processed += 1
-
-        pm_prices = polymarket_price_map.get(slug)
-        if pm_prices is None:
-            missing_polymarket_slug_count += 1
-            continue
 
         if ticker not in kalshi_cache:
             try:
                 kalshi_cache[ticker] = _fetch_kalshi_prices(
-                    kalshi_transport,
+                    transport,
                     base_url=kalshi_base_url,
                     ticker=ticker,
                 )
@@ -311,7 +267,6 @@ def run(
                     consecutive_overload_errors += 1
                 else:
                     consecutive_overload_errors = 0
-
                 if max_consecutive_overload > 0 and consecutive_overload_errors >= max_consecutive_overload:
                     terminated_early = True
                     overload_termination_status_code = overload_status
@@ -319,13 +274,10 @@ def run(
                 continue
 
         kalshi_target, kalshi_end = kalshi_cache[ticker]
-        pm_target, pm_end = pm_prices
-        before_state = dict(row["extras"])
+        before = dict(row["extras"])
         row["extras"]["kalshi_target"] = kalshi_target
         row["extras"]["kalshi_end"] = kalshi_end
-        row["extras"]["polymarket_target"] = pm_target
-        row["extras"]["polymarket_end"] = pm_end
-        if row["extras"] != before_state:
+        if row["extras"] != before:
             rows_updated += 1
 
         should_print_progress = (
@@ -366,8 +318,8 @@ def run(
             "rows_selected": len(candidates),
             "rows_updated": rows_updated,
             "rows_processed": processed,
-            "rows_already_complete": len(parsed_rows) - len(candidates),
-            "missing_polymarket_slugs": missing_polymarket_slug_count,
+            "rows_missing_polymarket_prices": missing_polymarket_rows,
+            "rows_already_have_kalshi_prices": already_has_kalshi_rows,
             "kalshi_fetch_failures": failed_kalshi_fetches,
             "terminated_early": terminated_early,
             "overload_termination_status_code": overload_termination_status_code,
@@ -378,43 +330,20 @@ def run(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Append Kalshi and Polymarket target/end prices to resolved_15m_pairs.log."
+        description="Fill missing Kalshi target/end prices for resolved pairs that already have Polymarket prices."
     )
     parser.add_argument("--config", default="config/run_config.json")
     parser.add_argument("--pair-log", default="data/diagnostic/resolved_15m_pairs.log")
     parser.add_argument(
-        "--polymarket-validation-log",
-        default="data/diagnostic/polymarket_chainlink_price_validation.log",
-    )
-    parser.add_argument(
         "--only-missing",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Only enrich rows that do not already have all 4 price fields.",
+        help="Only update rows missing Kalshi target/end prices.",
     )
-    parser.add_argument(
-        "--max-lines",
-        type=int,
-        default=None,
-        help="Process at most this many selected rows.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Estimate selected rows only; do not write log updates.",
-    )
-    parser.add_argument(
-        "--progress-every",
-        type=int,
-        default=200,
-        help="Print progress every N processed selected rows.",
-    )
-    parser.add_argument(
-        "--sleep-ms",
-        type=int,
-        default=0,
-        help="Optional sleep between processed rows (milliseconds).",
-    )
+    parser.add_argument("--max-lines", type=int, default=None, help="Process at most this many selected rows.")
+    parser.add_argument("--dry-run", action="store_true", help="Estimate selected rows only; do not write updates.")
+    parser.add_argument("--progress-every", type=int, default=200, help="Print progress every N selected rows.")
+    parser.add_argument("--sleep-ms", type=int, default=0, help="Optional sleep between rows (milliseconds).")
     parser.add_argument(
         "--max-consecutive-overload",
         type=int,
@@ -429,7 +358,6 @@ def main() -> None:
     summary = run(
         config_path=Path(args.config),
         pair_log_path=Path(args.pair_log),
-        polymarket_validation_log_path=Path(args.polymarket_validation_log),
         only_missing=bool(args.only_missing),
         max_lines=args.max_lines,
         dry_run=bool(args.dry_run),
@@ -437,13 +365,13 @@ def main() -> None:
         sleep_ms=args.sleep_ms,
         max_consecutive_overload=args.max_consecutive_overload,
     )
-    print("Resolved pair log enrichment complete")
+    print("Kalshi-only enrichment complete")
     print(f"Pair log: {summary['pair_log']}")
     totals = summary.get("totals", {})
     print(f"Rows selected: {totals.get('rows_selected')}")
     print(f"Rows updated: {totals.get('rows_updated')}")
-    print(f"Rows already complete: {totals.get('rows_already_complete')}")
-    print(f"Missing Polymarket slugs: {totals.get('missing_polymarket_slugs')}")
+    print(f"Rows missing Polymarket prices: {totals.get('rows_missing_polymarket_prices')}")
+    print(f"Rows already have Kalshi prices: {totals.get('rows_already_have_kalshi_prices')}")
     print(f"Kalshi fetch failures: {totals.get('kalshi_fetch_failures')}")
     print(f"Unique Kalshi tickers fetched: {summary.get('unique_kalshi_markets_fetched')}")
     if totals.get("terminated_early"):
