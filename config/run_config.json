@@ -14,7 +14,7 @@
     "target_market": ""
   },
   "buy": {
-    "min_gross_edge_threshold": 0.05,
+    "min_gross_edge_threshold": 0.04,
     "max_spend_per_market_usd": 12.0,
     "max_size_cap_per_leg": 10.0,
     "min_size_per_leg_contracts": 5.0,
@@ -33,7 +33,7 @@
   "buy_execution": {
     "enabled": true,
     "cooldown_ms": 17000,
-    "max_attempts_per_run": 100,
+    "max_attempts_per_run": 3,
     "parallel_leg_timeout_ms": 10000,
     "api_retry": {
       "enabled": true,
@@ -66,15 +66,36 @@
     "kalshi_orders_poll_seconds": 30.0,
     "loop_sleep_seconds": 0.2,
     "drift_tolerance_contracts": 0.0,
-    "max_exposure_per_market_usd": 12.0,
+    "max_exposure_per_market_usd": 22.0,
     "include_pending_orders_in_exposure": true,
     "stale_warning_seconds": 45,
     "stale_error_seconds": 60
   },
+  "reverse_strategy": {
+    "enabled": true,
+    "poll_interval_seconds": 10.0,
+    "loop_sleep_seconds": 1.0,
+    "observation_window_seconds": 120,
+    "yes_threshold": 0.97,
+    "no_threshold": 0.03,
+    "order_limit_price": 0.49,
+    "order_size": 10,
+    "dry_run": false,
+    "output_dir": "data/limit_market",
+    "state_file": "data/limit_market/reverse_strategy_state.json",
+    "start_price_capture_grace_seconds": 20,
+    "resolution_wait_after_end_seconds": 45,
+    "rtds_symbol": "BTC/USD",
+    "rtds_max_age_ms": 15000,
+    "rtds_resolution_epsilon_usd": 0.0,
+    "log_events": true,
+    "log_decision_polls": true,
+    "log_order_attempts": true
+  },
   "execution": {
     "best_ask_and_bids_at_max": 0.89,
     "best_ask_and_bids_at_min": 0.11,
-    "market_start_trade_time_seconds": 120,
-    "market_end_trade_time_seconds": 120
+    "market_start_trade_time_seconds": 0,
+    "market_end_trade_time_seconds": 0
   }
 }

@@ -80,6 +80,49 @@ Selection logic: market status is active, `window_end` is in the future, and clo
 
 **Caution**: `--skip-discovery` requires a fresh `data/market_pair_cache.json`. If the cache contains expired market windows, the engine will find no active segments and exit with 0 messages.
 
+### Manual Market Setup (No Discovery)
+
+You can run one explicit market pair from a setup file (hard override of discovery):
+
+```powershell
+.venv\Scripts\python.exe -m scripts.run.start_engine `
+  --market-setup-file config/market_setup.example.json `
+  --duration-seconds 0 `
+  --no-enable-buy-execution
+```
+
+Notes:
+
+- With `--market-setup-file`, discovery is not used.
+- In manual mode with `--duration-seconds 0`, runtime auto-stops at the selected market `window_end`.
+- Unknown keys in setup file fail by default (`--market-setup-strict`, default true).
+
+Manual setup file shape:
+
+```json
+{
+  "mode": "manual_pair_v1",
+  "pair": {
+    "polymarket": {
+      "market_id": "1465732",
+      "condition_id": "0xaaaa9edf4c6ba43e6ad09cf204864f5c9864a7f575945215826aa9e3ca8bb97e",
+      "yes_outcome": "Weibo Gaming"
+    },
+    "kalshi": {
+      "ticker": "KXLOLGAME-26MAR02TESWB-WB"
+    }
+  }
+}
+```
+
+The engine enriches Polymarket from `market_id` at startup (`event_slug`, tokens, `window_end`).
+For non-literal outcome markets (for example team-vs-team), set one of:
+
+- `pair.polymarket.yes_outcome` (recommended, outcome label string from Polymarket), or
+- both `pair.polymarket.token_yes` and `pair.polymarket.token_no`.
+
+Manual mode prints the resolved Polymarket yes/no labels and token IDs at startup.
+
 Engine outputs (in `data/`):
 
 - `arbitrage_engine_summary__*.json` — run summary with message counts, health, quotes
@@ -103,6 +146,32 @@ Engine outputs (in `data/`):
 ```
 
 Polymarket `custom_feature_enabled=true` is on by default. Use `--no-custom-feature-enabled` to disable.
+
+## Reverse Premarket Strategy (Polymarket-only)
+
+Run the standalone reverse premarket strategy:
+
+```powershell
+.venv\Scripts\python.exe -m scripts.limit_premarket.start_reverse_strategy --config config/run_config.json
+```
+
+Behavior summary:
+
+- monitors current BTC 15m Polymarket market
+- determines current outcome (threshold, official resolution, RTDS fallback)
+- places one reverse-side GTC limit order in the next market
+
+Logging config defaults are read from `config.run_config.json` under `reverse_strategy`.
+Optional CLI overrides:
+
+- `--log-events/--no-log-events`
+- `--log-decision-polls/--no-log-decision-polls`
+- `--log-order-attempts/--no-log-order-attempts`
+
+Always-on strategy logs:
+
+- order errors (`kind=order_error`)
+- order fills / partial fills (`kind=order_fill`)
 
 ### Trade Log Diagnostic
 
@@ -147,6 +216,8 @@ POLYMARKET_FUNDER=
 
 - `docs/trading.md` — Trading execution design (buy/sell flow, safeguards, lock behavior)
 - `docs/websocket.md` — WebSocket implementation details
+- `docs/market_surveillance_runbook.md` — Market surveillance operations and monitoring commands
+- `docs/market_surveillance_data_flow.md` — Detailed source-to-timestamp mapping for surveillance prices
 - `docs/Improve_lag.md` — Health metric accuracy improvements
 - `docs\position_monitoring.md`
 - `docs\run_scripts_overview.md`

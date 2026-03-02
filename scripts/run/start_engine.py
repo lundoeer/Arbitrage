@@ -10,13 +10,11 @@ Flow:
 
 from __future__ import annotations
 
-import asyncio
-import os
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
 
@@ -26,27 +24,19 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.run.engine_cli import build_parser
 from scripts.common.engine_logger import EngineLogger
-from scripts.common.engine_setup import (
-    build_buy_execution_clients,
-    build_position_components,
+from scripts.common.market_selection import (
+    load_selected_markets,
+    load_selected_markets_from_setup_file,
 )
-from scripts.common.kalshi_auth import resolve_kalshi_ws_headers
-from scripts.common.market_selection import load_selected_markets, safe_name
-from scripts.common.position_polling import capture_account_portfolio_snapshot, PositionReconcileLoopConfig
+from scripts.common.position_polling import PositionReconcileLoopConfig
 from scripts.common.run_config import (
     load_buy_execution_runtime_config_from_run_config,
     load_decision_config_from_run_config,
     load_health_config_from_run_config,
     load_position_monitoring_runtime_config_from_run_config,
     load_sell_execution_runtime_config_from_run_config,
-    health_config_to_dict,
-    decision_config_to_dict,
-    buy_execution_runtime_config_to_dict,
-    position_monitoring_runtime_config_to_dict,
-    sell_execution_runtime_config_to_dict,
 )
-from scripts.common.ws_collectors import KalshiWsCollector, PolymarketWsCollector
-from scripts.common.ws_transport import NullWriter, JsonlWriter, now_ms
+from scripts.common.ws_transport import now_ms
 from scripts.run.arbitrage_engine import ArbitrageEngine
 
 
@@ -76,6 +66,10 @@ def main() -> None:
     kalshi_channels = [c.strip() for c in str(args.kalshi_channels).split(",") if c.strip()]
     if not kalshi_channels:
         raise RuntimeError("At least one Kalshi channel must be provided.")
+    manual_setup_file_raw = str(getattr(args, "market_setup_file", "") or "").strip()
+    manual_setup_mode = bool(manual_setup_file_raw)
+    manual_setup_path = Path(manual_setup_file_raw) if manual_setup_mode else None
+    manual_setup_strict = bool(getattr(args, "market_setup_strict", True))
 
     # 1. Load Configurations
     health_config = load_health_config_from_run_config(config_path=config_path)
@@ -166,6 +160,8 @@ def main() -> None:
         print("Position monitoring requested; adapters will initialize per discovered market segment.")
     if account_snapshot_logging_enabled:
         print("Account snapshot logging enabled; boundary snapshots will be written per run/market.")
+    if manual_setup_mode:
+        print(f"Manual market setup mode enabled via: {manual_setup_file_raw}")
 
     # 2. Setup Central Logger Context
     logger = EngineLogger(run_id=run_id, project_root=PROJECT_ROOT)
@@ -212,26 +208,48 @@ def main() -> None:
             if run_start_deadline_ms is not None and loop_now_ms >= run_start_deadline_ms:
                 break
 
-            run_discovery_first = True if engine.segment_index > 0 else (not bool(args.skip_discovery))
-            try:
-                selection = load_selected_markets(
+            if manual_setup_mode:
+                if manual_setup_path is None:
+                    raise RuntimeError("manual_setup_path is required in manual setup mode")
+                selection = load_selected_markets_from_setup_file(
                     config_path=config_path,
-                    discovery_output=Path(args.discovery_output),
-                    pair_cache_path=Path(args.pair_cache),
-                    run_discovery_first=run_discovery_first,
+                    market_setup_file=manual_setup_path,
+                    strict=manual_setup_strict,
                 )
-            except Exception as exc:
-                print(f"Market discovery failed: {exc}")
-                if run_start_deadline_ms is not None and now_ms() >= run_start_deadline_ms:
-                    break
-                time.sleep(1.0)
-                continue
+                pm_selection = selection.get("polymarket", {})
+                kx_selection = selection.get("kalshi", {})
+                print(
+                    "Manual setup resolved orientation: "
+                    f"kalshi_ticker={kx_selection.get('ticker')}, "
+                    f"polymarket_yes_label={pm_selection.get('yes_outcome_label')}, "
+                    f"polymarket_no_label={pm_selection.get('no_outcome_label')}, "
+                    f"polymarket_token_yes={pm_selection.get('token_yes')}, "
+                    f"polymarket_token_no={pm_selection.get('token_no')}, "
+                    f"source={pm_selection.get('token_orientation_source')}"
+                )
+            else:
+                run_discovery_first = True if engine.segment_index > 0 else (not bool(args.skip_discovery))
+                try:
+                    selection = load_selected_markets(
+                        config_path=config_path,
+                        discovery_output=Path(args.discovery_output),
+                        pair_cache_path=Path(args.pair_cache),
+                        run_discovery_first=run_discovery_first,
+                    )
+                except Exception as exc:
+                    print(f"Market discovery failed: {exc}")
+                    if run_start_deadline_ms is not None and now_ms() >= run_start_deadline_ms:
+                        break
+                    time.sleep(1.0)
+                    continue
 
             market_window_end_epoch_ms = _parse_iso_to_epoch_ms(
                 selection.get("polymarket", {}).get("window_end")
                 or selection.get("kalshi", {}).get("window_end")
             )
             if market_window_end_epoch_ms is None:
+                if manual_setup_mode:
+                    raise RuntimeError("Manual setup could not resolve market window_end from Polymarket/Kalshi.")
                 print("Discovery returned market without window_end; retrying discovery.")
                 if run_start_deadline_ms is not None and now_ms() >= run_start_deadline_ms:
                     break
@@ -241,6 +259,8 @@ def main() -> None:
             segment_now_ms = now_ms()
             seconds_to_market_end = int(max(0, (int(market_window_end_epoch_ms) - int(segment_now_ms) + 999) // 1000))
             if seconds_to_market_end <= 0:
+                if manual_setup_mode:
+                    raise RuntimeError("Manual setup market window_end is not in the future.")
                 time.sleep(0.5)
                 continue
 
@@ -249,9 +269,13 @@ def main() -> None:
                 remaining_seconds = int(max(0, (int(run_start_deadline_ms) - int(segment_now_ms) + 999) // 1000))
                 if remaining_seconds <= 0:
                     break
-            segment_duration_seconds = (
-                seconds_to_market_end if remaining_seconds is None else min(seconds_to_market_end, remaining_seconds)
-            )
+            if manual_setup_mode and remaining_seconds is None:
+                # In manual mode with --duration-seconds 0, auto-stop at market window_end.
+                segment_duration_seconds = int(seconds_to_market_end)
+            else:
+                segment_duration_seconds = (
+                    seconds_to_market_end if remaining_seconds is None else min(seconds_to_market_end, remaining_seconds)
+                )
             if segment_duration_seconds <= 0:
                 break
 
@@ -260,6 +284,8 @@ def main() -> None:
                 market_window_end_epoch_ms=market_window_end_epoch_ms,
                 segment_duration_seconds=segment_duration_seconds,
             )
+            if manual_setup_mode:
+                break
 
         # Post-run End of Loop Execution
         if position_monitoring_requested or account_snapshot_logging_enabled:

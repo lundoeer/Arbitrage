@@ -1,0 +1,2 @@
+{"recv_ms": 2000, "message": {"type": "ticker", "msg": {"yes_bid_dollars": "0.4500", "yes_ask_dollars": "0.4700", "yes_bid_size_fp": "180.0", "yes_ask_size_fp": "175.0", "ts": "2"}}}
+

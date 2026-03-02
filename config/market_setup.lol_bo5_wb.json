@@ -1,0 +1,13 @@
+{
+  "mode": "manual_pair_v1",
+  "pair": {
+    "polymarket": {
+      "market_id": "1465732",
+      "condition_id": "0xaaaa9edf4c6ba43e6ad09cf204864f5c9864a7f575945215826aa9e3ca8bb97e",
+      "yes_outcome": "Weibo Gaming"
+    },
+    "kalshi": {
+      "ticker": "KXLOLGAME-26MAR02TESWB-WB"
+    }
+  }
+}

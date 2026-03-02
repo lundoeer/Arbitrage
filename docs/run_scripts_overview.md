@@ -17,7 +17,9 @@ For the production engine, the call chain is:
 High-level flow:
 
 1. `start_engine.py` parses CLI args, loads config, applies CLI overrides, and initializes `EngineLogger`.
-2. It builds an `ArbitrageEngine` instance and repeatedly discovers/rotates active 15m market segments.
+2. It builds an `ArbitrageEngine` instance and either:
+   - repeatedly discovers/rotates active segments, or
+   - runs one manual setup pair when `--market-setup-file` is provided.
 3. For each segment, `ArbitrageEngine.run_segment(...)` builds collectors/runtimes and calls `asyncio.run(run_core_loop(...))`.
 4. `run_core_loop(...)` owns all per-segment concurrent loops and returns per-segment stats.
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,9 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.common.buy_execution import BuyExecutionClients, BuyIdempotencyState
-from scripts.common.buy_fsm import BuyFsmRuntime
 from scripts.common.decision_runtime import SharePriceRuntime
-from scripts.common.edge_snapshots import build_edge_snapshot as _build_edge_snapshot
 from scripts.common.engine_logger import EngineLogger
 from scripts.common.engine_setup import (
     build_buy_execution_clients,
@@ -29,13 +26,9 @@ from scripts.common.run_config import (
     PositionMonitoringRuntimeConfig,
     SellExecutionRuntimeConfig,
     WsHealthConfig,
-    health_config_to_dict,
-    decision_config_to_dict,
-    buy_execution_runtime_config_to_dict,
-    position_monitoring_runtime_config_to_dict,
 )
 from scripts.common.ws_collectors import KalshiWsCollector, PolymarketWsCollector
-from scripts.common.ws_transport import NullWriter, now_ms, utc_now_iso
+from scripts.common.ws_transport import NullWriter, now_ms
 from scripts.common.utils import as_dict as _as_dict, as_float as _as_float
 from scripts.run.engine_loop import run_core_loop
 
@@ -184,12 +177,21 @@ class ArbitrageEngine:
         market_window_end_epoch_ms: int,
         segment_duration_seconds: int,
     ) -> None:
+        selection_source = str(selection.get("selection_source") or "").strip()
         pm_slug = str(selection["polymarket"]["event_slug"])
         pm_market_id = str(selection["polymarket"]["market_id"])
         pm_condition_id = str(selection["polymarket"].get("condition_id") or "").strip()
         pm_yes = str(selection["polymarket"]["token_yes"])
         pm_no = str(selection["polymarket"]["token_no"])
         kx_ticker = str(selection["kalshi"]["ticker"])
+        is_manual_setup = selection_source == "manual_setup_file"
+        is_standard_btc15 = str(kx_ticker).upper().startswith("KXBTC15M")
+        disable_market_not_open_check = bool(is_manual_setup and not is_standard_btc15)
+        if disable_market_not_open_check:
+            print(
+                "Time gate override enabled: skipping market_not_open check "
+                "for manual non-BTC15 market."
+            )
         
         # Build Buy Execution Clients
         segment_buy_execution_enabled = False
@@ -481,6 +483,8 @@ class ArbitrageEngine:
             "polymarket_token_no": pm_no,
             "kalshi_ticker": kx_ticker,
             "market_window_end_epoch_ms": market_window_end_epoch_ms,
+            "selection_source": selection_source,
+            "disable_market_not_open_check": bool(disable_market_not_open_check),
         }
 
         segment_account_snapshot_start: Optional[Dict[str, Any]] = None

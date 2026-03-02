@@ -21,6 +21,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pair-cache", default="data/market_pair_cache.json")
     parser.add_argument("--skip-discovery", action="store_true")
     parser.add_argument(
+        "--market-setup-file",
+        default="",
+        help="Manual setup file path. When provided, discovery is bypassed (hard override).",
+    )
+    parser.add_argument(
+        "--market-setup-strict",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail on unknown keys in manual market setup file (default: true).",
+    )
+    parser.add_argument(
         "--kalshi-channels",
         default="ticker,orderbook_delta",
         help="Comma-separated Kalshi WS channels.",

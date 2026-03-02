@@ -783,6 +783,7 @@ def _evaluate_time_window(
     execution_config: ExecutionDecisionConfig,
     now_epoch_ms: Optional[int],
     market_window_end_epoch_ms: Optional[int],
+    skip_market_not_open_check: bool = False,
 ) -> Dict[str, Any]:
     now_ms = int(now_epoch_ms if now_epoch_ms is not None else int(time.time() * 1000))
     start_buffer_s = int(execution_config.market_start_trade_time_seconds)
@@ -801,6 +802,7 @@ def _evaluate_time_window(
             "start_buffer_seconds": start_buffer_s,
             "end_buffer_seconds": end_buffer_s,
             "market_duration_seconds": market_duration_s,
+            "market_not_open_check_disabled": bool(skip_market_not_open_check),
         }
 
     window_end_ms = int(market_window_end_epoch_ms)
@@ -811,10 +813,11 @@ def _evaluate_time_window(
     if start_buffer_s + end_buffer_s >= market_duration_s:
         reasons.append("time_buffers_block_full_market")
 
-    if now_ms < window_start_ms:
-        reasons.append("market_not_open")
-    elif seconds_since_start < start_buffer_s:
-        reasons.append("market_start_buffer_active")
+    if not bool(skip_market_not_open_check):
+        if now_ms < window_start_ms:
+            reasons.append("market_not_open")
+        elif seconds_since_start < start_buffer_s:
+            reasons.append("market_start_buffer_active")
 
     if now_ms >= window_end_ms:
         reasons.append("market_closed")
@@ -831,6 +834,7 @@ def _evaluate_time_window(
         "start_buffer_seconds": start_buffer_s,
         "end_buffer_seconds": end_buffer_s,
         "market_duration_seconds": market_duration_s,
+        "market_not_open_check_disabled": bool(skip_market_not_open_check),
     }
 
 
@@ -840,12 +844,16 @@ def _evaluate_execution_gate(
     decision_config: DecisionConfig,
     now_epoch_ms: Optional[int],
     market_window_end_epoch_ms: Optional[int],
+    market_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    market_ctx = _as_dict(market_context)
+    skip_market_not_open_check = bool(market_ctx.get("disable_market_not_open_check"))
     bounds = _evaluate_price_bounds(quote_sanity=quote_sanity, decision_config=decision_config)
     time_window = _evaluate_time_window(
         execution_config=decision_config.execution,
         now_epoch_ms=now_epoch_ms,
         market_window_end_epoch_ms=market_window_end_epoch_ms,
+        skip_market_not_open_check=skip_market_not_open_check,
     )
     reasons = list(bounds.get("reasons") or []) + list(time_window.get("reasons") or [])
     return {
@@ -1022,6 +1030,7 @@ class DecisionRuntime:
         market_window_end_epoch_ms: Optional[int] = None,
     ) -> DecisionSnapshot:
         cfg = decision_config or _default_decision_config()
+        market_ctx = _as_dict(market_context)
         health_can_trade = bool(kalshi_health.get("decision_ok")) and bool(polymarket_health.get("decision_ok"))
         quote_sanity = build_quote_sanity_and_canonical(quotes)
         canonical = _as_dict(quote_sanity.get("canonical"))
@@ -1031,6 +1040,7 @@ class DecisionRuntime:
             decision_config=cfg,
             now_epoch_ms=now_epoch_ms,
             market_window_end_epoch_ms=market_window_end_epoch_ms,
+            market_context=market_ctx,
         )
         buy_signal = _evaluate_buy_signal_gate(
             quote_sanity=quote_sanity,
@@ -1043,7 +1053,6 @@ class DecisionRuntime:
         shared_gate_ready = bool(health_can_trade and decision_ready and bool(execution_gate.get("pass")))
         buy_signal_ready = bool(shared_gate_ready and bool(buy_signal.get("pass")))
         sell_signal_ready = bool(shared_gate_ready and bool(sell_signal.get("pass")))
-        market_ctx = _as_dict(market_context)
         execution_plan: Optional[Dict[str, Any]] = None
         execution_plan_reasons: List[str] = []
         if buy_signal_ready:

@@ -1,0 +1,3 @@
+{"recv_ms": 1000, "message": {"event_type": "book", "asset_id": "pm_yes_a", "bids": [[0.39, 200.0]], "asks": [[0.41, 180.0]], "timestamp": "1000"}}
+{"recv_ms": 1001, "message": {"event_type": "book", "asset_id": "pm_no_a", "bids": [[0.58, 210.0]], "asks": [[0.60, 170.0]], "timestamp": "1001"}}
+

@@ -44,15 +44,28 @@ How this file is structured:
 - [x] #36 - Implement market_emulation_slippage config for buying. to replace the current hardcoded value.
 - [x] #35 - Implement get trades today and yesterday, with optional flag for other period.
 
+- [x] #33 - Creation of a market surveillance script, that can be transfered to a separate repo, to run on its own there. The data files I want it to keep updated is:
+
+data\diagnostic\resolved_15m_pairs.log - will be placed withing the new structure - copy it to there when the structure is decided
+A new file that has the BTC-USD price per second for both kalshi and polymarket, as well as best_ask price and size for all 4 combinations of venue and yes/no
+
+Polymarket data should be gotten from chain link, kalshi data can be gotten from quering their website. this is described in C:\Projects\Arbitrage\docs\kalshi_targets_price.md
+
+- [x] #40 - discover current markets with different filters. goal is to get a list of markets from both venues that end today and where I can evaluate whether it is the same market on both sides and the size of the market. It should also give me the input for setting them up for a future run with the arbitrage engine. I am thinking that i should be able to copy paste lines to a new setup file, where that the arbitrage engine can be setup to use as an input file in place of discover markets.
+- [x] #39 - implement alternate markets. Implement a run for an alternate market pair - implemenent a run where the market are setup not by discovery but .
+
 ## Now
 
 ## Next
 
-- [ ] #37 - Improve Polymarket order-failure diagnostics for `PolyApiException[status_code=None, error_message=Request exception!]`: log underlying transport exception context (type/message/trace), record per-attempt timing + retry metadata, and explicitly distinguish transport failures from API-limit responses (e.g., 425/429) in buy execution logs.
-- [ ] #33 - Implement market surveillance - target price on market start and through chainlink - and regular current price surveillance. It should be evenly spread between target and price differences. investigate this also
-- [ ] #36 - always log failed order and their responses.
+- [ ] #38 - Implement script that finds the target prices for new markets. After a new market pair is found. wait one minute, then find the target for the each market in the current market pair by querying the websites.
 
-- [ ] #34 unify locks for sell/hedge and buy
+- [ ] #37 - Improve Polymarket order-failure diagnostics for `PolyApiException[status_code=None, error_message=Request exception!]`: log underlying transport exception context (type/message/trace), record per-attempt timing + retry metadata, and explicitly distinguish transport failures from API-limit responses (e.g., 425/429) in buy execution logs.
+
+- [ ] #36 - always log failed order and their responses.
+-
+
+- [ ] #34 unify locks for sell/hedge and buy - this will be changed to an entirely new task based on new decisions
 - [ ] #32 remove fallbacks from tests so the fail when they are meant to
 
 ## Later
