@@ -46,6 +46,7 @@ except Exception:
 
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
 POLYMARKET_RTDS_WS_URL = "wss://ws-live-data.polymarket.com"
+POLYMARKET_RTDS_WS_ORIGIN = "https://polymarket.com"
 WINDOW_SECONDS = 900
 WINDOW_BOUNDARY_MINUTES = {0, 15, 30, 45}
 
@@ -162,6 +163,7 @@ class ReverseStrategyConfig:
     rtds_symbol: str = "BTC/USD"
     rtds_max_age_ms: int = 15_000
     rtds_resolution_epsilon_usd: float = 0.0
+    previous_window_resolution_grace_seconds: int = 180
     log_events: bool = True
     log_decision_polls: bool = True
     log_order_attempts: bool = True
@@ -214,6 +216,11 @@ def _load_reverse_strategy_config(*, config_path: Path) -> ReverseStrategyConfig
             section.get("rtds_resolution_epsilon_usd"),
             default=0.0,
             min_value=0.0,
+        ),
+        previous_window_resolution_grace_seconds=_to_int(
+            section.get("previous_window_resolution_grace_seconds"),
+            default=180,
+            min_value=0,
         ),
         log_events=_to_bool(section.get("log_events"), default=True),
         log_decision_polls=_to_bool(section.get("log_decision_polls"), default=True),
@@ -321,6 +328,212 @@ class ReverseStrategyLogger:
             self.orders_writer.close()
         except Exception:
             pass
+
+
+class PolymarketLastTradeAdapter:
+    def __init__(
+        self,
+        *,
+        ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+        recv_timeout_seconds: float = 2.0,
+        reconnect_base_seconds: float = 1.0,
+        reconnect_max_seconds: float = 30.0,
+    ) -> None:
+        self.ws_url = str(ws_url)
+        self.recv_timeout_seconds = max(0.5, float(recv_timeout_seconds))
+        self.reconnect_base_seconds = max(0.2, float(reconnect_base_seconds))
+        self.reconnect_max_seconds = max(self.reconnect_base_seconds, float(reconnect_max_seconds))
+
+        self._lock = threading.Lock()
+        self._started = False
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._desired_assets: tuple[str, ...] = ()
+        self._last_trade_by_asset: Dict[str, Dict[str, Any]] = {}
+        self._message_count = 0
+        self._last_error: Optional[str] = None
+        self._active_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._active_ws: Optional[Any] = None
+
+    @staticmethod
+    def _subscription_payload(*, asset_ids: tuple[str, ...]) -> Dict[str, Any]:
+        assets = [str(asset_id) for asset_id in asset_ids]
+        return {
+            "type": "MARKET",
+            "asset_ids": assets,
+            "assets_ids": assets,
+            "custom_feature_enabled": True,
+        }
+
+    @staticmethod
+    def _iter_message_items(parsed: Any) -> List[Dict[str, Any]]:
+        if isinstance(parsed, dict):
+            return [parsed]
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        return []
+
+    def _extract_last_trade_event(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        event_type = str(item.get("event_type") or "").strip().lower()
+        if event_type != "last_trade_price":
+            return None
+        asset_id = str(item.get("asset_id") or "").strip()
+        if not asset_id:
+            return None
+        trade_price = _normalize_share_price(as_float(item.get("price")))
+        if trade_price is None:
+            return None
+        source_timestamp_ms = int(as_float(item.get("timestamp")) or 0)
+        if source_timestamp_ms <= 0:
+            source_timestamp_ms = int(now_ms())
+        trade_size = as_float(item.get("size"))
+        trade_side = str(item.get("side") or "").strip().lower() or None
+        return {
+            "asset_id": asset_id,
+            "trade_price": float(trade_price),
+            "trade_size": None if trade_size is None else float(trade_size),
+            "trade_side": trade_side,
+            "source_timestamp_ms": int(source_timestamp_ms),
+        }
+
+    def _apply_event(self, event: Dict[str, Any]) -> None:
+        asset_id = str(event.get("asset_id") or "").strip()
+        if not asset_id:
+            return
+        with self._lock:
+            self._last_trade_by_asset[asset_id] = dict(event)
+            self._message_count += 1
+            self._last_error = None
+
+    def set_assets(self, *, token_yes: str, token_no: str) -> None:
+        assets = tuple(
+            asset
+            for asset in (str(token_yes or "").strip(), str(token_no or "").strip())
+            if asset
+        )
+        with self._lock:
+            self._desired_assets = assets
+
+    def get_last_trade_for_asset(self, *, asset_id: str) -> Optional[Dict[str, Any]]:
+        key = str(asset_id or "").strip()
+        if not key:
+            return None
+        with self._lock:
+            row = self._last_trade_by_asset.get(key)
+            return dict(row) if isinstance(row, dict) else None
+
+    def snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "desired_assets": list(self._desired_assets),
+                "message_count": int(self._message_count),
+                "last_error": self._last_error,
+            }
+
+    async def _worker_loop(self) -> None:
+        if websockets is None:
+            with self._lock:
+                self._last_error = "missing_websocket_dependency"
+            return
+
+        attempt = 0
+        while not self._stop_event.is_set():
+            with self._lock:
+                desired_assets = tuple(self._desired_assets)
+            if not desired_assets:
+                await asyncio.sleep(0.2)
+                continue
+            try:
+                async with websockets.connect(
+                    self.ws_url,
+                    additional_headers={
+                        "Origin": POLYMARKET_RTDS_WS_ORIGIN,
+                        "User-Agent": "Arbitrage-Reverse-Strategy/1.0",
+                    },
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=10,
+                    max_size=8 * 1024 * 1024,
+                ) as ws:
+                    with self._lock:
+                        self._active_loop = asyncio.get_running_loop()
+                        self._active_ws = ws
+                    attempt = 0
+                    await ws.send(json.dumps(self._subscription_payload(asset_ids=desired_assets)))
+                    while not self._stop_event.is_set():
+                        with self._lock:
+                            current_assets = tuple(self._desired_assets)
+                        if current_assets != desired_assets:
+                            break
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=self.recv_timeout_seconds)
+                        except asyncio.TimeoutError:
+                            continue
+                        try:
+                            parsed = json.loads(raw)
+                        except Exception:
+                            continue
+                        for item in self._iter_message_items(parsed):
+                            event = self._extract_last_trade_event(item)
+                            if event is None:
+                                continue
+                            self._apply_event(event)
+            except Exception as exc:
+                attempt += 1
+                with self._lock:
+                    self._last_error = str(exc)
+                delay = min(self.reconnect_max_seconds, self.reconnect_base_seconds * (2 ** min(attempt - 1, 8)))
+                slept = 0.0
+                while slept < delay and not self._stop_event.is_set():
+                    chunk = min(0.25, delay - slept)
+                    await asyncio.sleep(chunk)
+                    slept += chunk
+            finally:
+                with self._lock:
+                    self._active_ws = None
+                    self._active_loop = None
+
+    def _worker_main(self) -> None:
+        try:
+            asyncio.run(self._worker_loop())
+        except Exception as exc:
+            with self._lock:
+                self._last_error = str(exc)
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        self._thread = threading.Thread(
+            target=self._worker_main,
+            name="reverse-strategy-last-trade-worker",
+            daemon=True,
+        )
+        self._thread.start()
+
+    async def _close_ws(self, ws: Any) -> None:
+        try:
+            await ws.close(code=1000, reason="client shutdown")
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self._stop_event.set()
+        active_loop: Optional[asyncio.AbstractEventLoop]
+        active_ws: Optional[Any]
+        with self._lock:
+            active_loop = self._active_loop
+            active_ws = self._active_ws
+        if active_loop is not None and active_ws is not None:
+            try:
+                future = asyncio.run_coroutine_threadsafe(self._close_ws(active_ws), active_loop)
+                future.result(timeout=2.0)
+            except Exception:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
 
 class PolymarketRtdsPriceAdapter:
     def __init__(
@@ -450,6 +663,10 @@ class PolymarketRtdsPriceAdapter:
             try:
                 async with websockets.connect(
                     self.ws_url,
+                    additional_headers={
+                        "Origin": POLYMARKET_RTDS_WS_ORIGIN,
+                        "User-Agent": "Arbitrage-Reverse-Strategy/1.0",
+                    },
                     ping_interval=20,
                     ping_timeout=20,
                     close_timeout=10,
@@ -695,6 +912,24 @@ def _fetch_market_window(*, transport: ApiTransport, window_start_s: int) -> Opt
     )
 
 
+def _resolve_observed_last_trade_yes_price(
+    *,
+    market: MarketWindow,
+    last_trade_adapter: PolymarketLastTradeAdapter,
+) -> Optional[float]:
+    yes_row = last_trade_adapter.get_last_trade_for_asset(asset_id=market.token_yes)
+    yes_price = _normalize_share_price(as_float(as_dict(yes_row).get("trade_price")))
+    if yes_price is not None:
+        return float(yes_price)
+
+    # If only NO token traded recently, infer YES as complement.
+    no_row = last_trade_adapter.get_last_trade_for_asset(asset_id=market.token_no)
+    no_price = _normalize_share_price(as_float(as_dict(no_row).get("trade_price")))
+    if no_price is not None:
+        return float(max(0.0, min(1.0, 1.0 - float(no_price))))
+    return None
+
+
 def _extract_order_response_core(response: Dict[str, Any]) -> Dict[str, Any]:
     root = as_dict(response)
     nested = as_dict(root.get("response"))
@@ -839,13 +1074,19 @@ def _determine_outcome(
     config: ReverseStrategyConfig,
     start_price_entry: Optional[Dict[str, Any]],
     rtds_price_now: Optional[float],
+    observed_last_trade_yes_price: Optional[float],
+    allow_threshold: bool,
 ) -> Dict[str, Any]:
     now_s = int(now_epoch_ms // 1000)
     seconds_to_end = int(current_market.window_end_s - now_s)
     in_observation_window = bool(0 <= seconds_to_end <= int(config.observation_window_seconds))
-    observed_last_trade = current_market.last_trade_yes_price
+    observed_last_trade = (
+        float(observed_last_trade_yes_price)
+        if observed_last_trade_yes_price is not None
+        else current_market.last_trade_yes_price
+    )
 
-    if in_observation_window and observed_last_trade is not None:
+    if allow_threshold and in_observation_window and observed_last_trade is not None:
         if float(observed_last_trade) >= float(config.yes_threshold):
             return {
                 "resolved": True,
@@ -1010,6 +1251,8 @@ def main() -> None:
         max_age_ms=int(strategy_config.rtds_max_age_ms),
     )
     rtds.start()
+    last_trade_ws = PolymarketLastTradeAdapter()
+    last_trade_ws.start()
 
     order_client: Any = None
     if not bool(strategy_config.dry_run):
@@ -1097,28 +1340,90 @@ def main() -> None:
             next_poll_ms = int(now_epoch_ms + (float(strategy_config.poll_interval_seconds) * 1000.0))
             counters["decision_polls"] += 1
 
-            try:
-                current_market = _fetch_market_window(transport=api_transport, window_start_s=current_window_start_s)
-                next_market = _fetch_market_window(transport=api_transport, window_start_s=current_window_start_s + WINDOW_SECONDS)
-            except Exception as exc:
-                counters["market_lookup_failures"] += 1
+            within_previous_grace = bool(
+                now_epoch_ms
+                <= int(
+                    (current_window_start_s * 1000)
+                    + (int(strategy_config.previous_window_resolution_grace_seconds) * 1000)
+                )
+            )
+            market_window_starts = {
+                int(current_window_start_s),
+                int(current_window_start_s + WINDOW_SECONDS),
+            }
+            if within_previous_grace:
+                market_window_starts.add(int(current_window_start_s - WINDOW_SECONDS))
+
+            markets_by_window: Dict[int, Optional[MarketWindow]] = {}
+            market_lookup_errors: Dict[str, str] = {}
+            for window_start in sorted(market_window_starts):
+                try:
+                    markets_by_window[int(window_start)] = _fetch_market_window(
+                        transport=api_transport,
+                        window_start_s=int(window_start),
+                    )
+                except Exception as exc:
+                    markets_by_window[int(window_start)] = None
+                    market_lookup_errors[str(int(window_start))] = f"{type(exc).__name__}:{exc}"
+
+            if market_lookup_errors:
+                counters["market_lookup_failures"] += len(market_lookup_errors)
                 logger.write_event(
                     kind="market_lookup_error",
                     payload={
                         "window_start_s": int(current_window_start_s),
-                        "error": f"{type(exc).__name__}:{exc}",
+                        "errors": market_lookup_errors,
                     },
                 )
-                continue
 
-            if current_market is None or next_market is None:
+            current_market = markets_by_window.get(int(current_window_start_s))
+            next_market = markets_by_window.get(int(current_window_start_s + WINDOW_SECONDS))
+            previous_market = (
+                markets_by_window.get(int(current_window_start_s - WINDOW_SECONDS))
+                if within_previous_grace
+                else None
+            )
+
+            if current_market is not None:
+                last_trade_ws.set_assets(
+                    token_yes=current_market.token_yes,
+                    token_no=current_market.token_no,
+                )
+
+            candidate_pairs: List[Dict[str, Any]] = []
+            if within_previous_grace and previous_market is not None and current_market is not None:
+                candidate_pairs.append(
+                    {
+                        "candidate_kind": "previous_window_grace",
+                        "signal_market": previous_market,
+                        "signal_window_start_s": int(previous_market.window_start_s),
+                        "target_market": current_market,
+                        "allow_threshold": False,
+                        "use_ws_last_trade": False,
+                    }
+                )
+            if current_market is not None and next_market is not None:
+                candidate_pairs.append(
+                    {
+                        "candidate_kind": "current_window",
+                        "signal_market": current_market,
+                        "signal_window_start_s": int(current_market.window_start_s),
+                        "target_market": next_market,
+                        "allow_threshold": True,
+                        "use_ws_last_trade": True,
+                    }
+                )
+
+            if not candidate_pairs:
                 counters["market_lookup_failures"] += 1
                 logger.write_event(
                     kind="market_lookup_incomplete",
                     payload={
                         "window_start_s": int(current_window_start_s),
+                        "within_previous_grace": bool(within_previous_grace),
                         "current_market_found": bool(current_market is not None),
                         "next_market_found": bool(next_market is not None),
+                        "previous_market_found": bool(previous_market is not None),
                     },
                 )
                 continue
@@ -1132,153 +1437,180 @@ def main() -> None:
                 rtds_now_row = None
                 rtds_now_price = None
 
-            start_price_entry = state.get_start_price(window_start_s=current_window_start_s)
-            determination = _determine_outcome(
-                current_market=current_market,
-                now_epoch_ms=now_epoch_ms,
-                config=strategy_config,
-                start_price_entry=start_price_entry,
-                rtds_price_now=rtds_now_price,
-            )
+            for candidate in candidate_pairs:
+                signal_market = candidate["signal_market"]
+                target_market = candidate["target_market"]
+                signal_window_start_s = int(candidate["signal_window_start_s"])
+                allow_threshold = bool(candidate["allow_threshold"])
+                use_ws_last_trade = bool(candidate["use_ws_last_trade"])
 
-            if bool(strategy_config.log_decision_polls):
-                logger.write_event(
-                    kind="decision_poll",
+                start_price_entry = state.get_start_price(window_start_s=signal_window_start_s)
+                observed_last_trade_yes_price = (
+                    _resolve_observed_last_trade_yes_price(
+                        market=signal_market,
+                        last_trade_adapter=last_trade_ws,
+                    )
+                    if use_ws_last_trade
+                    else None
+                )
+                determination = _determine_outcome(
+                    current_market=signal_market,
+                    now_epoch_ms=now_epoch_ms,
+                    config=strategy_config,
+                    start_price_entry=start_price_entry,
+                    rtds_price_now=rtds_now_price,
+                    observed_last_trade_yes_price=observed_last_trade_yes_price,
+                    allow_threshold=allow_threshold,
+                )
+
+                if bool(strategy_config.log_decision_polls):
+                    logger.write_event(
+                        kind="decision_poll",
+                        payload={
+                            "window_start_s": int(current_window_start_s),
+                            "candidate_kind": str(candidate["candidate_kind"]),
+                            "signal_window_start_s": int(signal_window_start_s),
+                            "signal_market": {
+                                "slug": signal_market.slug,
+                                "market_id": signal_market.market_id,
+                                "condition_id": signal_market.condition_id,
+                                "window_end_s": int(signal_market.window_end_s),
+                                "last_trade_yes_price_api": signal_market.last_trade_yes_price,
+                                "last_trade_yes_price_observed": observed_last_trade_yes_price,
+                                "official_resolution": signal_market.official_resolution,
+                            },
+                            "target_market": {
+                                "slug": target_market.slug,
+                                "market_id": target_market.market_id,
+                                "condition_id": target_market.condition_id,
+                            },
+                            "rtds": rtds_now_row,
+                            "start_price": start_price_entry,
+                            "last_trade_ws": last_trade_ws.snapshot(),
+                            "determination": determination,
+                        },
+                    )
+
+                if not bool(determination.get("resolved")):
+                    continue
+
+                reason = str(determination.get("reason") or "")
+                if reason.startswith("last_trade_threshold"):
+                    counters["resolved_threshold"] += 1
+                elif reason == "official_market_resolution":
+                    counters["resolved_official"] += 1
+                elif reason == "rtds_start_end_fallback":
+                    counters["resolved_rtds"] += 1
+
+                outcome = str(determination.get("outcome") or "").strip().lower()
+                if outcome not in {"yes", "no"}:
+                    continue
+
+                target_market_key = str(target_market.market_id or target_market.slug).strip()
+                if not target_market_key:
+                    continue
+                if state.is_next_market_attempted(market_key=target_market_key):
+                    continue
+
+                reverse_side = "no" if outcome == "yes" else "yes"
+                target_token = target_market.token_no if outcome == "yes" else target_market.token_yes
+                signal_id = f"reverse-premarket-{signal_window_start_s}-{target_market_key}"
+                attempt_meta = {
+                    "attempted_at_ms": int(now_epoch_ms),
+                    "run_id": run_id,
+                    "window_start_s": int(current_window_start_s),
+                    "candidate_kind": str(candidate["candidate_kind"]),
+                    "signal_window_start_s": int(signal_window_start_s),
+                    "signal_slug": signal_market.slug,
+                    "target_market_key": target_market_key,
+                    "target_slug": target_market.slug,
+                    "resolved_outcome": outcome,
+                    "resolved_reason": reason,
+                    "reverse_side": reverse_side,
+                    "target_token": target_token,
+                }
+                state.mark_next_market_attempt(
+                    market_key=target_market_key,
                     payload={
-                        "window_start_s": int(current_window_start_s),
-                        "current_market": {
-                            "slug": current_market.slug,
-                            "market_id": current_market.market_id,
-                            "condition_id": current_market.condition_id,
-                            "window_end_s": int(current_market.window_end_s),
-                            "last_trade_yes_price": current_market.last_trade_yes_price,
-                            "official_resolution": current_market.official_resolution,
-                        },
-                        "next_market": {
-                            "slug": next_market.slug,
-                            "market_id": next_market.market_id,
-                            "condition_id": next_market.condition_id,
-                        },
-                        "rtds": rtds_now_row,
-                        "start_price": start_price_entry,
-                        "determination": determination,
+                        **attempt_meta,
+                        "status": "in_flight",
                     },
                 )
 
-            if not bool(determination.get("resolved")):
-                continue
+                counters["orders_attempted"] += 1
+                order_result = _place_reverse_order(
+                    client=order_client,
+                    signal_id=signal_id,
+                    target_market=target_market,
+                    target_side=reverse_side,
+                    target_token=target_token,
+                    config=strategy_config,
+                    dry_run=bool(strategy_config.dry_run),
+                )
+                ok = bool(order_result.get("ok"))
+                normalized = as_dict(order_result.get("normalized"))
+                order_status = str(normalized.get("status") or "")
+                is_fill = _is_fill_response(normalized)
 
-            reason = str(determination.get("reason") or "")
-            if reason.startswith("last_trade_threshold"):
-                counters["resolved_threshold"] += 1
-            elif reason == "official_market_resolution":
-                counters["resolved_official"] += 1
-            elif reason == "rtds_start_end_fallback":
-                counters["resolved_rtds"] += 1
+                if ok:
+                    counters["orders_submitted"] += 1
+                else:
+                    counters["order_errors"] += 1
+                if is_fill:
+                    counters["order_fills"] += 1
 
-            outcome = str(determination.get("outcome") or "").strip().lower()
-            if outcome not in {"yes", "no"}:
-                continue
-
-            next_market_key = str(next_market.market_id or next_market.slug).strip()
-            if not next_market_key:
-                continue
-            if state.is_next_market_attempted(market_key=next_market_key):
-                continue
-
-            reverse_side = "no" if outcome == "yes" else "yes"
-            target_token = next_market.token_no if outcome == "yes" else next_market.token_yes
-            signal_id = f"reverse-premarket-{current_window_start_s}-{next_market_key}"
-            attempt_meta = {
-                "attempted_at_ms": int(now_epoch_ms),
-                "run_id": run_id,
-                "current_window_start_s": int(current_window_start_s),
-                "current_slug": current_market.slug,
-                "next_market_key": next_market_key,
-                "next_slug": next_market.slug,
-                "resolved_outcome": outcome,
-                "resolved_reason": reason,
-                "reverse_side": reverse_side,
-                "target_token": target_token,
-            }
-            state.mark_next_market_attempt(
-                market_key=next_market_key,
-                payload={
-                    **attempt_meta,
-                    "status": "in_flight",
-                },
-            )
-
-            counters["orders_attempted"] += 1
-            order_result = _place_reverse_order(
-                client=order_client,
-                signal_id=signal_id,
-                target_market=next_market,
-                target_side=reverse_side,
-                target_token=target_token,
-                config=strategy_config,
-                dry_run=bool(strategy_config.dry_run),
-            )
-            ok = bool(order_result.get("ok"))
-            normalized = as_dict(order_result.get("normalized"))
-            order_status = str(normalized.get("status") or "")
-            is_fill = _is_fill_response(normalized)
-
-            if ok:
-                counters["orders_submitted"] += 1
-            else:
-                counters["order_errors"] += 1
-            if is_fill:
-                counters["order_fills"] += 1
-
-            state.mark_next_market_attempt(
-                market_key=next_market_key,
-                payload={
-                    **attempt_meta,
-                    "status": (
-                        "dry_run"
-                        if bool(strategy_config.dry_run)
-                        else ("submitted" if ok else "failed")
-                    ),
-                    "order_status": order_status or None,
-                    "is_fill": bool(is_fill),
-                    "result": order_result,
-                },
-            )
-
-            if bool(strategy_config.log_order_attempts):
-                logger.write_order(
-                    kind="order_attempt",
+                state.mark_next_market_attempt(
+                    market_key=target_market_key,
                     payload={
                         **attempt_meta,
-                        "ok": ok,
+                        "status": (
+                            "dry_run"
+                            if bool(strategy_config.dry_run)
+                            else ("submitted" if ok else "failed")
+                        ),
+                        "order_status": order_status or None,
+                        "is_fill": bool(is_fill),
                         "result": order_result,
                     },
                 )
-            if not ok:
-                logger.write_order(
-                    kind="order_error",
-                    payload={
-                        **attempt_meta,
-                        "error": str(order_result.get("error") or "unknown_order_error"),
-                        "request": as_dict(order_result.get("request")),
-                    },
-                )
-            if is_fill:
-                logger.write_order(
-                    kind="order_fill",
-                    payload={
-                        **attempt_meta,
-                        "normalized": normalized,
-                        "response": as_dict(order_result.get("response")),
-                    },
-                )
+
+                if bool(strategy_config.log_order_attempts):
+                    logger.write_order(
+                        kind="order_attempt",
+                        payload={
+                            **attempt_meta,
+                            "ok": ok,
+                            "result": order_result,
+                        },
+                    )
+                if not ok:
+                    logger.write_order(
+                        kind="order_error",
+                        payload={
+                            **attempt_meta,
+                            "error": str(order_result.get("error") or "unknown_order_error"),
+                            "request": as_dict(order_result.get("request")),
+                        },
+                    )
+                if is_fill:
+                    logger.write_order(
+                        kind="order_fill",
+                        payload={
+                            **attempt_meta,
+                            "normalized": normalized,
+                            "response": as_dict(order_result.get("response")),
+                        },
+                    )
 
     except KeyboardInterrupt:
         logger.write_event(kind="strategy_stop", payload={"reason": "keyboard_interrupt"})
     finally:
         try:
             rtds.close()
+        except Exception:
+            pass
+        try:
+            last_trade_ws.close()
         except Exception:
             pass
         summary = {

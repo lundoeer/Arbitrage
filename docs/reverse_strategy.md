@@ -22,10 +22,14 @@ Run command:
 1. Identify current and next Polymarket BTC 15m markets by slug time bucket.
 2. Capture RTDS BTC price at market boundary (`00/15/30/45`) as start price.
 3. During final 2 minutes of current market, poll current market every 10s:
-   - if `lastTradePrice >= 0.97` -> current outcome YES
-   - if `lastTradePrice <= 0.03` -> current outcome NO
+   - use live CLOB market websocket `last_trade_price` for YES/NO tokens
+   - if YES price `>= 0.97` -> current outcome YES
+   - if YES price `<= 0.03` -> current outcome NO
 4. If threshold did not determine outcome:
-   - try official market resolution from `outcomePrices` near market end.
+   - after market end, wait `resolution_wait_after_end_seconds`
+   - try official market resolution from `outcomePrices`
+   - keep checking previous market for
+     `previous_window_resolution_grace_seconds` after boundary rollover
 5. If official resolution is unavailable:
    - use RTDS fallback (`end_price vs start_price`) only when start price was
      captured for that market.
@@ -84,6 +88,7 @@ Dedicated config section in `config/run_config.json`:
 - `reverse_strategy.rtds_symbol`
 - `reverse_strategy.rtds_max_age_ms`
 - `reverse_strategy.rtds_resolution_epsilon_usd`
+- `reverse_strategy.previous_window_resolution_grace_seconds`
 - `reverse_strategy.log_events`
 - `reverse_strategy.log_decision_polls`
 - `reverse_strategy.log_order_attempts`

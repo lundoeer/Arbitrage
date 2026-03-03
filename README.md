@@ -158,7 +158,8 @@ Run the standalone reverse premarket strategy:
 Behavior summary:
 
 - monitors current BTC 15m Polymarket market
-- determines current outcome (threshold, official resolution, RTDS fallback)
+- determines current outcome (live CLOB last-trade threshold, official resolution, RTDS fallback)
+- after boundary rollover, re-checks previous market resolution for a configurable grace window
 - places one reverse-side GTC limit order in the next market
 
 Logging config defaults are read from `config.run_config.json` under `reverse_strategy`.

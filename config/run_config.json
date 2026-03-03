@@ -88,6 +88,7 @@
     "rtds_symbol": "BTC/USD",
     "rtds_max_age_ms": 15000,
     "rtds_resolution_epsilon_usd": 0.0,
+    "previous_window_resolution_grace_seconds": 120,
     "log_events": true,
     "log_decision_polls": true,
     "log_order_attempts": true
