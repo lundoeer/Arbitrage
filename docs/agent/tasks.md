@@ -53,10 +53,15 @@ Polymarket data should be gotten from chain link, kalshi data can be gotten from
 
 - [x] #40 - discover current markets with different filters. goal is to get a list of markets from both venues that end today and where I can evaluate whether it is the same market on both sides and the size of the market. It should also give me the input for setting them up for a future run with the arbitrage engine. I am thinking that i should be able to copy paste lines to a new setup file, where that the arbitrage engine can be setup to use as an input file in place of discover markets.
 - [x] #39 - implement alternate markets. Implement a run for an alternate market pair - implemenent a run where the market are setup not by discovery but .
+- [x] #41 - Log during reverse strategy runs. I would like a specific log to be made or added to during each run. It should only be one persistent file in logs where information is added during runs.
 
 ## Now
 
+- [ ] #42 - create streamlined version of limit reverse, improve end of market determination.
+
 ## Next
+
+- [ ] #43 - migrate to render
 
 - [ ] #38 - Implement script that finds the target prices for new markets. After a new market pair is found. wait one minute, then find the target for the each market in the current market pair by querying the websites.
 

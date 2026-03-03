@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -200,10 +201,108 @@ def normalize_polymarket_event(message: Dict[str, Any], recv_ms: int) -> Iterabl
         }
         return
 
+    # Market-resolution update (when available from upstream payloads).
+    emitted_resolution = False
+    for resolution_event in normalize_polymarket_market_resolution_event(message, recv_ms):
+        emitted_resolution = True
+        yield resolution_event
+    if emitted_resolution:
+        return
+
     yield {
         "kind": "control_or_unknown",
         "source_event_type": event_type or "unknown",
         "asset_id": asset_id or None,
+    }
+
+
+def _parse_outcomes_list(raw: Any) -> List[str]:
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, str):
+        text = str(raw).strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    return []
+
+
+def _to_index(raw: Any) -> Optional[int]:
+    value = to_float(raw)
+    if value is None:
+        return None
+    try:
+        idx = int(value)
+    except Exception:
+        return None
+    if idx < 0:
+        return None
+    return int(idx)
+
+
+def normalize_polymarket_market_resolution_event(message: Dict[str, Any], recv_ms: int) -> Iterable[Dict[str, Any]]:
+    event_type = str(message.get("event_type") or message.get("type") or "").strip().lower()
+    source_ts_ms = to_epoch_ms(
+        message.get("last_update")
+        or message.get("timestamp")
+        or message.get("updatedAt")
+        or message.get("matchtime")
+    )
+    lag_ms = recv_ms - source_ts_ms if source_ts_ms is not None else None
+
+    condition_id = to_text(message.get("condition_id")) or to_text(message.get("conditionId")) or to_text(message.get("market"))
+    if not condition_id:
+        return
+
+    resolution_raw = (
+        to_text(message.get("resolved_outcome"))
+        or to_text(message.get("winner"))
+        or to_text(message.get("resolution"))
+        or to_text(message.get("result"))
+        or to_text(message.get("outcome"))
+    )
+    outcome = to_outcome_side(resolution_raw)
+
+    if outcome is None:
+        idx = (
+            _to_index(message.get("outcomeIndex"))
+            or _to_index(message.get("winnerIndex"))
+            or _to_index(message.get("resolution_index"))
+        )
+        outcomes = _parse_outcomes_list(message.get("outcomes"))
+        if idx is not None and outcomes and idx < len(outcomes):
+            outcome = to_outcome_side(outcomes[idx])
+
+    resolution_status = (
+        to_text(message.get("umaResolutionStatus"))
+        or to_text(message.get("resolution_status"))
+        or to_text(message.get("status"))
+    )
+    status_norm = str(resolution_status or "").strip().lower()
+    is_resolved = bool(
+        message.get("resolved") is True
+        or status_norm in {"resolved", "finalized", "settled", "closed"}
+        or event_type in {"resolution", "market_resolution", "market_resolved", "resolved"}
+    )
+
+    if outcome not in {"yes", "no"} and not is_resolved:
+        return
+
+    yield {
+        "kind": "polymarket_market_resolution",
+        "condition_id": str(condition_id),
+        "outcome": outcome if outcome in {"yes", "no"} else None,
+        "is_resolved": bool(is_resolved),
+        "resolution_status": status_norm or None,
+        "source_event_type": event_type or "resolution",
+        "source_timestamp_ms": source_ts_ms,
+        "lag_ms": lag_ms,
+        "raw": message,
     }
 
 

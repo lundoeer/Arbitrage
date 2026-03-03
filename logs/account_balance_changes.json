@@ -1,0 +1,62 @@
+[
+  {
+    "time": "2026-02-22T19:23:36Z",
+    "kalshi_usd": 100.07,
+    "polymarket_usd": 107.026474,
+    "total_usd": 207.096474
+  },
+  {
+    "time": "2026-02-22T20:33:29Z",
+    "kalshi_usd": 100.07,
+    "polymarket_usd": 105.053775,
+    "total_usd": 205.123775
+  },
+  {
+    "time": "2026-02-22T20:41:57Z",
+    "kalshi_usd": 97.95,
+    "polymarket_usd": 97.253778,
+    "total_usd": 195.203778
+  },
+  {
+    "time": "2026-02-23T08:22:07Z",
+    "kalshi_usd": 97.95,
+    "polymarket_usd": 107.431632,
+    "total_usd": 205.381632
+  },
+  {
+    "time": "2026-02-23T08:45:13Z",
+    "kalshi_usd": 95.42,
+    "polymarket_usd": 100.241634,
+    "total_usd": 195.661634
+  },
+  {
+    "time": "2026-02-23T09:09:23Z",
+    "kalshi_usd": 95.42,
+    "polymarket_usd": 110.39986,
+    "total_usd": 205.81986
+  },
+  {
+    "time": "2026-02-23T11:57:03Z",
+    "kalshi_usd": 97.07,
+    "polymarket_usd": 109.326661,
+    "total_usd": 206.396661
+  },
+  {
+    "time": "2026-02-23T13:40:06Z",
+    "kalshi_usd": 95.37,
+    "polymarket_usd": 109.326661,
+    "total_usd": 204.696661
+  },
+  {
+    "time": "2026-02-23T13:45:13Z",
+    "kalshi_usd": 97.7,
+    "polymarket_usd": 101.526664,
+    "total_usd": 199.226664
+  },
+  {
+    "time": "2026-02-23T13:55:14Z",
+    "kalshi_usd": 97.89,
+    "polymarket_usd": 112.797819,
+    "total_usd": 210.687819
+  }
+]

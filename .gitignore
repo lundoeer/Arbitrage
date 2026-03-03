@@ -11,7 +11,7 @@ build/
 
 # ── Project data & secrets ──────────────────────────
 data/
-logs/
+
 *.env
 *.log
 
