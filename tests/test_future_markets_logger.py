@@ -154,3 +154,41 @@ def test_future_markets_logger_writes_nulls_and_errors_when_missing_data(tmp_pat
     assert "next_market_market_missing" in row["errors"]
     assert any(err.startswith("current_market_yes_book_error:") for err in row["errors"])
     assert "second_next_market_no_token_missing" in row["errors"]
+
+
+def test_future_markets_logger_selects_best_prices_from_unsorted_books(tmp_path: Path) -> None:
+    books = {
+        "cur_yes": {
+            "asks": [{"price": 0.99, "size": 3}, {"price": 0.53, "size": 7}, {"price": 0.72, "size": 2}],
+            "bids": [{"price": 0.01, "size": 9}, {"price": 0.47, "size": 5}, {"price": 0.35, "size": 1}],
+        },
+        "cur_no": {
+            "asks": [{"price": 0.98, "size": 4}, {"price": 0.41, "size": 8}, {"price": 0.66, "size": 2}],
+            "bids": [{"price": 0.02, "size": 6}, {"price": 0.58, "size": 3}, {"price": 0.17, "size": 1}],
+        },
+    }
+
+    runtime = FutureMarketsLoggerRuntime(
+        output_dir=tmp_path,
+        run_id="run-4",
+        enabled=True,
+        interval_seconds=10.0,
+        order_book_reader=lambda token_id: books[token_id],
+    )
+    market = _Market("cur", "cond-cur", "cur_yes", "cur_no")
+    runtime.maybe_write(
+        now_epoch_ms=30_000,
+        current_window_start_s=0,
+        current_market=market,
+        next_market=market,
+        second_next_market=market,
+        rtds_row={"price_usd": 1.0},
+    )
+    runtime.close()
+
+    assert runtime.path is not None
+    row = _read_jsonl(runtime.path)[0]
+    assert row["current_market_best_ask_price_yes"] == 0.53
+    assert row["current_market_best_bid_price_yes"] == 0.47
+    assert row["current_market_best_ask_price_no"] == 0.41
+    assert row["current_market_best_bid_price_no"] == 0.58

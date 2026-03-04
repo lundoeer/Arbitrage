@@ -82,11 +82,29 @@ class FutureMarketsLoggerRuntime:
         return (float(price) if price is not None else None, float(size) if size is not None else None)
 
     @staticmethod
-    def _top_from_side(side_levels: Any) -> tuple[Optional[float], Optional[float]]:
+    def _top_from_side(side_levels: Any, *, side: str) -> tuple[Optional[float], Optional[float]]:
         levels = list(side_levels or [])
         if not levels:
             return None, None
-        return FutureMarketsLoggerRuntime._read_level(levels[0])
+
+        side_norm = str(side or "").strip().lower()
+        if side_norm not in {"ask", "bid"}:
+            raise ValueError(f"invalid_side:{side}")
+
+        best_price: Optional[float] = None
+        best_size: Optional[float] = None
+        for level in levels:
+            price, size = FutureMarketsLoggerRuntime._read_level(level)
+            if price is None:
+                continue
+            if best_price is None:
+                best_price, best_size = price, size
+                continue
+            if side_norm == "ask" and price < best_price:
+                best_price, best_size = price, size
+            elif side_norm == "bid" and price > best_price:
+                best_price, best_size = price, size
+        return best_price, best_size
 
     def _default_order_book_reader(self, token_id: str) -> Any:
         if self._clob_import_error is not None:
@@ -108,8 +126,8 @@ class FutureMarketsLoggerRuntime:
         if isinstance(book, dict):
             asks = book.get("asks", asks)
             bids = book.get("bids", bids)
-        best_ask_price, best_ask_size = self._top_from_side(asks)
-        best_bid_price, best_bid_size = self._top_from_side(bids)
+        best_ask_price, best_ask_size = self._top_from_side(asks, side="ask")
+        best_bid_price, best_bid_size = self._top_from_side(bids, side="bid")
         return {
             "best_ask_price": best_ask_price,
             "best_ask_size": best_ask_size,
