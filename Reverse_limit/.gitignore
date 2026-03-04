@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Local env
+.env
+
+# Runtime outputs
+data/
+logs/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/

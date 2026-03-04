@@ -1,0 +1,41 @@
+{
+  "buy_execution": {
+    "enabled": true,
+    "cooldown_ms": 17000,
+    "max_attempts_per_run": 3,
+    "parallel_leg_timeout_ms": 10000,
+    "api_retry": {
+      "enabled": true,
+      "max_attempts": 3,
+      "base_backoff_seconds": 0.5,
+      "jitter_ratio": 0.2,
+      "include_post": true
+    }
+  },
+  "reverse_strategy": {
+    "enabled": true,
+    "poll_interval_seconds": 10.0,
+    "loop_sleep_seconds": 1.0,
+    "observation_window_seconds": 120,
+    "yes_threshold": 0.97,
+    "no_threshold": 0.03,
+    "order_limit_price": 0.49,
+    "order_size": 10,
+    "dry_run": false,
+    "output_dir": "data/limit_market",
+    "state_file": "data/limit_market/reverse_strategy_state.json",
+    "start_price_capture_grace_seconds": 20,
+    "resolution_wait_after_end_seconds": 45,
+    "rtds_symbol": "BTC/USD",
+    "rtds_max_age_ms": 15000,
+    "rtds_resolution_epsilon_usd": 0.0,
+    "preclose_last_trade_seconds_before_end": 1,
+    "preclose_yes_upper_threshold": 0.70,
+    "preclose_yes_lower_threshold": 0.30,
+    "ws_resolution_fallback_after_close_seconds": 600,
+    "previous_window_resolution_grace_seconds": 120,
+    "log_events": true,
+    "log_decision_polls": true,
+    "log_order_attempts": true
+  }
+}

@@ -46,7 +46,6 @@ from scripts.common.ws_normalization import (
     normalize_polymarket_user_event,
 )
 from scripts.common.ws_transport import JsonlWriter
-from scripts.limit_premarket.future_markets_logger import FutureMarketsLoggerRuntime
 
 try:
     import websockets
@@ -190,9 +189,6 @@ class ReverseStrategyConfig:
     log_events: bool = True
     log_decision_polls: bool = True
     log_order_attempts: bool = True
-    future_markets_log_enabled: bool = True
-    future_markets_log_interval_seconds: float = 10.0
-    future_markets_log_filename_template: str = "future_markets__{run_id}.jsonl"
 
 
 @dataclass(frozen=True)
@@ -273,15 +269,6 @@ def _load_reverse_strategy_config(*, config_path: Path) -> ReverseStrategyConfig
         log_events=_to_bool(section.get("log_events"), default=True),
         log_decision_polls=_to_bool(section.get("log_decision_polls"), default=True),
         log_order_attempts=_to_bool(section.get("log_order_attempts"), default=True),
-        future_markets_log_enabled=_to_bool(section.get("future_markets_log_enabled"), default=True),
-        future_markets_log_interval_seconds=_to_float(
-            section.get("future_markets_log_interval_seconds"),
-            default=10.0,
-            min_value=1.0,
-        ),
-        future_markets_log_filename_template=str(
-            section.get("future_markets_log_filename_template") or "future_markets__{run_id}.jsonl"
-        ),
     )
 
 
@@ -2342,8 +2329,6 @@ def main() -> None:
         "reverse_log_rows_partial": 0,
         "reverse_log_account_fetch_errors": 0,
         "reverse_log_resolution_fetch_errors": 0,
-        "future_markets_rows_written": 0,
-        "future_markets_rows_failed": 0,
     }
 
     api_transport = _build_api_transport()
@@ -2354,13 +2339,6 @@ def main() -> None:
     rtds.start()
     last_trade_ws = PolymarketLastTradeAdapter()
     last_trade_ws.start()
-    future_markets_log = FutureMarketsLoggerRuntime(
-        output_dir=output_dir,
-        run_id=run_id,
-        enabled=bool(strategy_config.future_markets_log_enabled),
-        interval_seconds=float(strategy_config.future_markets_log_interval_seconds),
-        filename_template=str(strategy_config.future_markets_log_filename_template),
-    )
     user_fill_ws: Optional[PolymarketUserFillAdapter] = None
     polymarket_account_client: Optional[PolymarketAccountPollClient] = None
     polymarket_user_address: Optional[str] = _resolve_polymarket_user_address_from_env()
@@ -2496,7 +2474,6 @@ def main() -> None:
             market_window_starts = {
                 int(current_window_start_s),
                 int(current_window_start_s + WINDOW_SECONDS),
-                int(current_window_start_s + (2 * WINDOW_SECONDS)),
             }
             if within_previous_grace:
                 market_window_starts.add(int(current_window_start_s - WINDOW_SECONDS))
@@ -2525,7 +2502,6 @@ def main() -> None:
 
             current_market = markets_by_window.get(int(current_window_start_s))
             next_market = markets_by_window.get(int(current_window_start_s + WINDOW_SECONDS))
-            second_next_market = markets_by_window.get(int(current_window_start_s + (2 * WINDOW_SECONDS)))
             previous_market = (
                 markets_by_window.get(int(current_window_start_s - WINDOW_SECONDS))
                 if within_previous_grace
@@ -2553,24 +2529,6 @@ def main() -> None:
                 user_address=polymarket_user_address,
                 account_client=polymarket_account_client,
                 last_trade_ws=last_trade_ws,
-            )
-
-            rtds_now_row: Optional[Dict[str, Any]] = None
-            rtds_now_price: Optional[float] = None
-            try:
-                rtds_now_row = rtds.read(at_ms=now_epoch_ms)
-                rtds_now_price = as_float(rtds_now_row.get("price_usd"))
-            except Exception:
-                rtds_now_row = None
-                rtds_now_price = None
-
-            future_markets_log.maybe_write(
-                now_epoch_ms=int(now_epoch_ms),
-                current_window_start_s=int(current_window_start_s),
-                current_market=current_market,
-                next_market=next_market,
-                second_next_market=second_next_market,
-                rtds_row=rtds_now_row,
             )
 
             candidate_pairs: List[Dict[str, Any]] = []
@@ -2610,6 +2568,15 @@ def main() -> None:
                     },
                 )
                 continue
+
+            rtds_now_row: Optional[Dict[str, Any]] = None
+            rtds_now_price: Optional[float] = None
+            try:
+                rtds_now_row = rtds.read(at_ms=now_epoch_ms)
+                rtds_now_price = as_float(rtds_now_row.get("price_usd"))
+            except Exception:
+                rtds_now_row = None
+                rtds_now_price = None
 
             for candidate in candidate_pairs:
                 signal_market = candidate["signal_market"]
@@ -2843,10 +2810,6 @@ def main() -> None:
         except Exception:
             pass
         try:
-            future_markets_log.close()
-        except Exception:
-            pass
-        try:
             market_log.on_periodic_tick(
                 now_epoch_ms=int(now_ms()),
                 api_transport=api_transport,
@@ -2865,8 +2828,6 @@ def main() -> None:
         counters["reverse_log_rows_partial"] = int(market_log.stats.get("rows_partial", 0))
         counters["reverse_log_account_fetch_errors"] = int(market_log.stats.get("account_fetch_errors", 0))
         counters["reverse_log_resolution_fetch_errors"] = int(market_log.stats.get("resolution_fetch_errors", 0))
-        counters["future_markets_rows_written"] = int(future_markets_log.stats.get("rows_written", 0))
-        counters["future_markets_rows_failed"] = int(future_markets_log.stats.get("rows_failed", 0))
         summary = {
             "run_id": run_id,
             "started_at_ms": int(started_at_ms),
@@ -2887,14 +2848,12 @@ def main() -> None:
                 "summary": str(logger.summary_path),
                 "state": str(state_path),
                 "persistent_market_log": str(persistent_market_log_path),
-                "future_markets": future_markets_log.stats.get("path"),
             },
             "user_fill_ws": (user_fill_ws.snapshot() if user_fill_ws is not None else None),
             "persistent_market_log": {
                 "path": str(persistent_market_log_path),
                 "stats": dict(market_log.stats),
             },
-            "future_markets_log": dict(future_markets_log.stats),
             "config": strategy_config.__dict__,
         }
         logger.summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
@@ -2910,8 +2869,6 @@ def main() -> None:
     print(f"Summary:     {logger.summary_path}")
     print(f"State file:  {state_path}")
     print(f"Persistent market log: {persistent_market_log_path}")
-    if future_markets_log.stats.get("path"):
-        print(f"Future markets log: {future_markets_log.stats.get('path')}")
 
 
 if __name__ == "__main__":

@@ -59,7 +59,6 @@ Files:
 
 - `reverse_strategy_events__<run_id>.jsonl`
 - `reverse_strategy_orders__<run_id>.jsonl`
-- `future_markets__<run_id>.jsonl`
 - `reverse_strategy_summary__<run_id>.json`
 - `reverse_strategy_state.json` (persistent)
 
@@ -93,9 +92,6 @@ Dedicated config section in `config/run_config.json`:
 - `reverse_strategy.log_events`
 - `reverse_strategy.log_decision_polls`
 - `reverse_strategy.log_order_attempts`
-- `reverse_strategy.future_markets_log_enabled`
-- `reverse_strategy.future_markets_log_interval_seconds`
-- `reverse_strategy.future_markets_log_filename_template`
 
 CLI overrides (optional, config remains default):
 
@@ -107,5 +103,6 @@ CLI overrides (optional, config remains default):
 
 - First market after process start may not have a captured start price.
   RTDS fallback is therefore intentionally unavailable for that market.
-- Strategy is a standalone command and is not integrated into
-  `scripts/run/start_engine.py`.
+- This repo is standalone for reverse strategy only.
+- Shared module reference:
+  - `docs/common_scripts.md` (what each `scripts/common/*` file does)

@@ -95,7 +95,10 @@
     "previous_window_resolution_grace_seconds": 120,
     "log_events": true,
     "log_decision_polls": true,
-    "log_order_attempts": true
+    "log_order_attempts": true,
+    "future_markets_log_enabled": true,
+    "future_markets_log_interval_seconds": 10.0,
+    "future_markets_log_filename_template": "future_markets__{run_id}.jsonl"
   },
   "execution": {
     "best_ask_and_bids_at_max": 0.89,

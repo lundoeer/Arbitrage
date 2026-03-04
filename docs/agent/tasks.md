@@ -57,7 +57,19 @@ Polymarket data should be gotten from chain link, kalshi data can be gotten from
 
 ## Now
 
-- [ ] #42 - create streamlined version of limit reverse, improve end of market determination.
+- [ ] #42 - improve logging. Create a new log future_markets.jsonl of the best_ask and bid prices and sizes. This should be logged ever 10 seconds for the next market and the market after that. I would like one line in the log to contain.
+
+current_market_age: how long since current market start (start is 15 min before window close)
+next_market_best_ask_price_yes: this is the best ask price yes for the market after the current
+also no, bids and sizes for this market
+second_market_best_ask_prices_yes: this is the best ask price for the market after the next market
+also no, bids and sizes for this market
+btc_price: current price of btc in usd
+current_market_best_ask_price_yes:
+ts:
+current_market_slug:
+
+so it would start like this: current_market_age, next_market_best_ask_price_yes, next_market_best_ask_price_no, next_market_best_ask_size_yes..... and so on
 
 ## Next
 
